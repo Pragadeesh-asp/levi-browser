@@ -25,7 +25,12 @@ This is an isolation proof, not a general-purpose browser. It has no address bar
 ## Recovery and source control
 
 - Git baseline: `6612b0175cc01fe2b80d6cef162ad967cee642ce` (`chore: establish LEVI Browser baseline`).
-- GitHub remote: not configured. The requested owner/repository is `levi28matthew/levi-browser`. The final `gh auth status` check reported no authenticated account; an earlier check reported `sunshine211104`, whose repository lookup failed. Authenticate as `levi28matthew` (or grant the active account access), then verify/create the private repository before configuring the remote.
+- GitHub owner: `Pragadeesh-asp`.
+- GitHub repository: [https://github.com/Pragadeesh-asp/levi-browser](https://github.com/Pragadeesh-asp/levi-browser); verified private, owned by `Pragadeesh-asp`, with default branch `main`.
+- Remote: `origin` → `https://github.com/Pragadeesh-asp/levi-browser.git`.
+- Push status: the existing local history was pushed without force. At initial push, tip was `577ac71a96e46334e983dd562f753281f5712608`; this Mission 001.6 documentation update is committed and pushed afterward.
+- Branch: `main` tracks `origin/main`.
+- Authenticated GitHub account at verification: `Pragadeesh-asp`.
 - Branch: `main`.
 - Next milestone: **Mission 002A — Address Bar and URL Navigation**. Do not begin it until the current milestone is reviewed and approved.
 - Retained Alpha/Beta test UDFs are outside this repository under `%LOCALAPPDATA%\com.levi.browser.foundation\profile-isolation-lab\alpha` and `...\beta`; both still exist. The previously referenced `browser-shell` path was absent at the final check; the app-local `EBWebView` directory exists and was left untouched.
