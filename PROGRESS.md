@@ -31,7 +31,6 @@ This is an isolation proof, not a general-purpose browser. It has no address bar
 - Push status: the existing local history was pushed without force. At initial push, tip was `577ac71a96e46334e983dd562f753281f5712608`; this Mission 001.6 documentation update is committed and pushed afterward.
 - Branch: `main` tracks `origin/main`.
 - Authenticated GitHub account at verification: `Pragadeesh-asp`.
-- Branch: `main`.
 - Next milestone: **Mission 002A — Address Bar and URL Navigation**. Do not begin it until the current milestone is reviewed and approved.
 - Retained Alpha/Beta test UDFs are outside this repository under `%LOCALAPPDATA%\com.levi.browser.foundation\profile-isolation-lab\alpha` and `...\beta`; both still exist. The previously referenced `browser-shell` path was absent at the final check; the app-local `EBWebView` directory exists and was left untouched.
 
