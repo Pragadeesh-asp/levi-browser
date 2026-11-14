@@ -24,8 +24,8 @@ This is an isolation proof, not a general-purpose browser. It has no address bar
 
 ## Recovery and source control
 
-- Git baseline: pending the initial local baseline commit; its hash will be recorded in a documentation checkpoint immediately afterward.
-- GitHub remote: not configured. The requested owner/repository is `levi28matthew/levi-browser`; the current `gh` login is `sunshine211104`, which could not view that repository.
+- Git baseline: `6612b0175cc01fe2b80d6cef162ad967cee642ce` (`chore: establish LEVI Browser baseline`).
+- GitHub remote: not configured. The requested owner/repository is `levi28matthew/levi-browser`; the current `gh` login is `sunshine211104`, and it could not view the requested repository. Authenticate as `levi28matthew` (or grant the active account access) before creating/verifying the private remote.
 - Branch: `main`.
 - Next milestone: **Mission 002A — Address Bar and URL Navigation**. Do not begin it until the current milestone is reviewed and approved.
 - Retained test UDFs are outside this repository under `%LOCALAPPDATA%\com.levi.browser.foundation\profile-isolation-lab\alpha` and `...\beta`. Do not remove them as part of Git setup.
