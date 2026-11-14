@@ -1,0 +1,60 @@
+# JavaScript dependencies and build output
+/node_modules/
+/dist/
+/.vite/
+/coverage/
+
+# Rust/Tauri build and generated CLI schemas
+/src-tauri/target/
+/src-tauri/gen/schemas/
+
+# WebView2 storage and browser-session state
+**/EBWebView/
+**/WebView2Data/
+**/profile-isolation-lab/
+**/browser-shell/
+**/browser-profiles/
+**/User Data/
+**/user-data/
+**/session-data/
+
+# Local secrets and credentials (keep .env.example templates if added)
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+
+# Local databases and machine-specific state
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.local
+
+# Logs and temporary files
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+
+# Operating-system/editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+.vs/
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.example.json

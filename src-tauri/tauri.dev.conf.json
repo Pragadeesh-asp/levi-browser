@@ -1,0 +1,8 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline' http://127.0.0.1:4173; script-src 'self' http://127.0.0.1:4173; connect-src ipc: http://ipc.localhost http://127.0.0.1:4173 ws://127.0.0.1:4173"
+    }
+  }
+}
