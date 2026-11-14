@@ -25,10 +25,10 @@ This is an isolation proof, not a general-purpose browser. It has no address bar
 ## Recovery and source control
 
 - Git baseline: `6612b0175cc01fe2b80d6cef162ad967cee642ce` (`chore: establish LEVI Browser baseline`).
-- GitHub remote: not configured. The requested owner/repository is `levi28matthew/levi-browser`; the current `gh` login is `sunshine211104`, and it could not view the requested repository. Authenticate as `levi28matthew` (or grant the active account access) before creating/verifying the private remote.
+- GitHub remote: not configured. The requested owner/repository is `levi28matthew/levi-browser`. The final `gh auth status` check reported no authenticated account; an earlier check reported `sunshine211104`, whose repository lookup failed. Authenticate as `levi28matthew` (or grant the active account access), then verify/create the private repository before configuring the remote.
 - Branch: `main`.
 - Next milestone: **Mission 002A — Address Bar and URL Navigation**. Do not begin it until the current milestone is reviewed and approved.
-- Retained test UDFs are outside this repository under `%LOCALAPPDATA%\com.levi.browser.foundation\profile-isolation-lab\alpha` and `...\beta`. Do not remove them as part of Git setup.
+- Retained Alpha/Beta test UDFs are outside this repository under `%LOCALAPPDATA%\com.levi.browser.foundation\profile-isolation-lab\alpha` and `...\beta`; both still exist. The previously referenced `browser-shell` path was absent at the final check; the app-local `EBWebView` directory exists and was left untouched.
 
 ## Checkpoint rules
 

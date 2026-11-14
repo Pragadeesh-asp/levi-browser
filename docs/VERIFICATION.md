@@ -46,11 +46,13 @@ The samples varied materially between runs, are short-lived working-set observat
 
 ## Evidence and retained data
 
-The local test UDFs were retained; no cleanup was performed:
+The profile data was not modified or cleaned up:
 
 - `%LOCALAPPDATA%\com.levi.browser.foundation\profile-isolation-lab\alpha`
 - `%LOCALAPPDATA%\com.levi.browser.foundation\profile-isolation-lab\beta`
-- `%LOCALAPPDATA%\com.levi.browser.foundation\browser-shell`
+- Both Alpha and Beta directories were confirmed to exist after the Git setup.
+- `%LOCALAPPDATA%\com.levi.browser.foundation\browser-shell` was absent at the final check.
+- `%LOCALAPPDATA%\com.levi.browser.foundation\EBWebView` exists and was left untouched; its contents were not recursively inspected for this Git task.
 
 No personal profiles, credentials, authentication data, Command Center records, or remote website data were used. No test UDF was deleted.
 
