@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "browser-chrome",
+  "description": "Tauri core APIs for LEVI Browser's local address bar webviews.",
+  "webviews": ["chrome-alpha", "chrome-beta"],
+  "permissions": ["core:default"]
+}

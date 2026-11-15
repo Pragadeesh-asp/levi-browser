@@ -2,37 +2,61 @@
 
 ## Current milestone
 
-**Mission 001 — Isolation POC completed.** The native Windows proof verified separate Alpha/Beta localStorage and cookie values and persistence after profile close/reopen and app restart.
+**Mission 002A — Native navigation and profile lifecycle implementation verified; awaiting commit approval.**
 
 ## Architecture
 
-Tauri 2 + Wry + WebView2 Runtime. Each test profile uses a separate persistent WebView2 User Data Folder under the LEVI app's local data directory. See [architecture](docs/ARCHITECTURE.md).
+Tauri 2 + Wry + WebView2 Runtime. Each Alpha/Beta website webview uses its existing separate persistent WebView2 User Data Folder under the LEVI app's local data directory. Browser chrome is a local Tauri child webview; website content is a separate child webview without app capabilities. See [architecture](docs/ARCHITECTURE.md).
 
 ## Verified results
 
-- Alpha and Beta rendered in native Windows WebView2 windows.
-- Alpha's synthetic marker was `ALPHA-LOCAL-7C2A`; Beta's was `BETA-LOCAL-91DF`.
-- Each marker appeared in its profile's localStorage and test cookie; no cross-profile leakage was observed in the local test origin.
-- Both profiles retained their values after close/reopen and a complete app restart.
-- Frontend production build, Rust build, Rust test harness, and Rust formatting check passed. The Rust crate has no automated tests yet.
-- Vite's development server is pinned to `127.0.0.1:4173` with strict port selection.
-- WebView2 Runtime on the verification machine: `157.0.4341.46`.
+- Mission 001 Windows proof: Alpha and Beta rendered in native WebView2 windows with separate `localStorage` and cookie markers (`ALPHA-LOCAL-7C2A` and `BETA-LOCAL-91DF`). No cross-profile leakage was observed on the local probe origin, and values persisted across close/reopen and app restart.
+- Mission 002A frontend production build passed, including separate Alpha and Beta browser chrome pages.
+- Mission 002A Rust tests pass for HTTP/HTTPS, scheme-less domains, configured HTTPS search URLs, and unsupported/malformed scheme rejection.
+- Native screenshots confirm the launcher and Alpha browser chrome render in actual Tauri/WebView2 windows.
+- The first native URL submission exposed a blocking child-webview creation path; the navigation command was changed to async.
+- User-reported native verification: Alpha visibly rendered `https://example.com` and Wikipedia; address synchronization, Back, Forward, Reload and Home worked. These are manual results, not automated tests.
+- User-reported profile verification: Alpha and Beta retained their distinct localStorage and cookie markers after application restart. These are manual results, not automated tests.
+- User-reported Mission 002A.3 lifecycle verification: Alpha and Beta each closed and reopened within the same running application, began with fresh navigation state, and left the other profile unaffected. These are manual results, not automated tests.
+- Final automated verification: `npm run build`, `cargo test` (5 passed), `cargo fmt --check`, `cargo build`, and `git diff --check` passed.
+- The retained Mission 002A.2 Rust log records Alpha child-WebView creation/show, navigation start, page-load completion and state-event emission. It does not capture frontend DevTools event receipt or Beta navigation.
+- Mission 002A.3 resets process-local navigation state when a profile window is destroyed, guards the closing interval, and returns empty state when no content WebView exists. Automated store lifecycle tests pass; native behavior remains user-reported rather than automatically tested.
+- Vite development server remains pinned to `127.0.0.1:4173` with strict port selection.
 
-## Limitations
+### Mission 002A.2 — Manual verification diagnostics
 
-This is an isolation proof, not a general-purpose browser. It has no address bar, general navigation, tab management, downloads UI, history/bookmarks, permissions UI, crash recovery, or Command Center integration. Resource measurements were indicative snapshots only and need controlled benchmarking. `npm run lint` is not configured; automated tests for profile isolation are not yet present. See [verification](docs/VERIFICATION.md).
+- Added redacted `[LEVI_DIAG]` Rust events for navigation invocation, URL validation, child-WebView creation/reuse/show, parent-window visibility, navigation start, page-load start/finish, and address-state event emission/failure. URL diagnostics include scheme and host only; paths, queries, page contents and credentials are not logged.
+- Browser chrome logs when the state listener is ready, when an address-state event arrives, and when the navigation invoke resolves or rejects. Initial state is queried only after listener registration completes.
+- The diagnostic log contains Rust stderr events; frontend listener-receipt messages are available only in the WebView DevTools console. A visible address-bar update remains the user-facing confirmation.
+- Native behavior and Alpha/Beta storage isolation have user-reported manual verification; there is no automated Tauri/WebView integration suite. Keep this distinction when reporting results.
+
+## Mission 002A implementation
+
+- Editable address field with Enter submission and Ctrl+L focus shortcut.
+- HTTP and HTTPS support, automatic HTTPS for unschemed domains, and search queries sent through a configurable DuckDuckGo, Google or Bing search URL.
+- Back, Forward, Reload, Stop and Home controls, with disabled states based on tracked top-level navigation.
+- Native WebView2 website content in a separate child webview, attached to the existing Alpha or Beta UDF. Empty state and local chrome remain separate from website content.
+- Loading feedback, Rust validation errors, and WebView2's built-in network error document.
+- Rust caller-label checks restrict browser control commands to the local shell or matching local browser chrome.
+
+## Limitations and pending verification
+
+- No automated test verifies actual WebView pixel rendering or Windows window lifecycle; those results are user-confirmed manual checks.
+- WebView2's built-in network error page is shown for load failures; Tauri's current page-load hook does not expose a structured network error reason.
+- Back/forward tracking follows top-level navigation and does not observe same-document SPA `history.pushState` changes.
+- New-window links, tabs, downloads, permissions UI, bookmarks, persistent browser history, crash recovery and Command Center integration are out of scope.
+- `npm run lint` is not configured. Resource measurements remain indicative rather than controlled. Automated regression coverage for Alpha/Beta storage isolation remains absent. See [verification](docs/VERIFICATION.md).
 
 ## Recovery and source control
 
-- Git baseline: `6612b0175cc01fe2b80d6cef162ad967cee642ce` (`chore: establish LEVI Browser baseline`).
+- Previous Git baseline: `6612b0175cc01fe2b80d6cef162ad967cee642ce` (`chore: establish LEVI Browser baseline`).
 - GitHub owner: `Pragadeesh-asp`.
-- GitHub repository: [https://github.com/Pragadeesh-asp/levi-browser](https://github.com/Pragadeesh-asp/levi-browser); verified private, owned by `Pragadeesh-asp`, with default branch `main`.
+- GitHub repository: [https://github.com/Pragadeesh-asp/levi-browser](https://github.com/Pragadeesh-asp/levi-browser); previously verified private, owned by `Pragadeesh-asp`, default branch `main`.
 - Remote: `origin` → `https://github.com/Pragadeesh-asp/levi-browser.git`.
-- Push status: the existing local history was pushed without force. At initial push, tip was `577ac71a96e46334e983dd562f753281f5712608`; this Mission 001.6 documentation update is committed and pushed afterward.
 - Branch: `main` tracks `origin/main`.
-- Authenticated GitHub account at verification: `Pragadeesh-asp`.
-- Next milestone: **Mission 002A — Address Bar and URL Navigation**. Do not begin it until the current milestone is reviewed and approved.
-- Retained Alpha/Beta test UDFs are outside this repository under `%LOCALAPPDATA%\com.levi.browser.foundation\profile-isolation-lab\alpha` and `...\beta`; both still exist. The previously referenced `browser-shell` path was absent at the final check; the app-local `EBWebView` directory exists and was left untouched.
+- Mission 002A remains uncommitted and unpushed pending user review and explicit commit approval.
+- Retained Alpha/Beta test UDFs are outside this repository under `%LOCALAPPDATA%\com.levi.browser.foundation\profile-isolation-lab\alpha` and `...\beta`; they were not moved, deleted or reset. The app-local `EBWebView` directory remains untouched.
+- Next task: obtain approval for the reviewed Mission 002A checkpoint. Do not start Mission 002B.
 
 ## Checkpoint rules
 
