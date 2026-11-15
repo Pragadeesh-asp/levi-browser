@@ -1,18 +1,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::Serialize;
-use std::{
-    collections::{HashMap, HashSet},
-    fs,
-    path::PathBuf,
-    sync::Mutex,
-};
+use std::{fs, path::PathBuf, sync::Mutex};
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     webview::WebviewBuilder,
     AppHandle, Emitter, Manager, Webview, WebviewUrl, WindowBuilder,
 };
 use url::Url;
+
+#[allow(dead_code)] // Registry operations are intentionally model-only until Mission 002B.1b.
+mod tabs;
+use tabs::BrowserRegistry;
 
 const CHROME_HEIGHT: f64 = 96.0;
 const INITIAL_WIDTH: f64 = 1120.0;
@@ -33,8 +32,8 @@ fn url_log_fields(url: &Url) -> String {
 
 #[derive(Default)]
 struct NavigationStore {
-    states: Mutex<HashMap<String, NavigationState>>,
-    closing_profiles: Mutex<HashSet<String>>,
+    registry: Mutex<BrowserRegistry>,
+    closing_profiles: Mutex<std::collections::HashSet<String>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -48,22 +47,59 @@ struct NavigationState {
     pending_history_index: Option<usize>,
 }
 
+impl From<tabs::TabNavigation> for NavigationState {
+    fn from(value: tabs::TabNavigation) -> Self {
+        Self {
+            current_url: value.current_url,
+            entries: value.entries,
+            index: value.index,
+            is_loading: value.loading,
+            error: value.error,
+            pending_history_index: value.pending_history_index,
+        }
+    }
+}
+
 impl NavigationStore {
     fn reset_profile(&self, profile_id: &str) {
-        if let Ok(mut states) = self.states.lock() {
-            states.remove(profile_id);
+        if let Ok(mut registry) = self.registry.lock() {
+            registry.remove_profile(profile_id);
         }
     }
 
     fn state_or_default(&self, profile_id: &str) -> NavigationState {
-        self.states
+        self.registry
             .lock()
             .ok()
-            .and_then(|states| states.get(profile_id).cloned())
+            .and_then(|registry| registry.active_navigation(profile_id).cloned())
+            .map(NavigationState::from)
             .unwrap_or_default()
     }
 
+    fn ensure_profile(&self, profile_id: &str) -> Result<(), String> {
+        let (window, chrome, content) = browser_labels(profile_id)?;
+        self.registry
+            .lock()
+            .map_err(|_| "Browser tab registry is unavailable.".to_owned())?
+            .open_profile(profile_id, window, chrome, content)?;
+        Ok(())
+    }
+
+    fn with_active_navigation<R>(
+        &self,
+        profile_id: &str,
+        update: impl FnOnce(&mut tabs::TabNavigation) -> R,
+    ) -> Option<R> {
+        let mut registry = self.registry.lock().ok()?;
+        registry.active_navigation_mut(profile_id).map(update)
+    }
+
     fn mark_closing(&self, profile_id: &str) -> Result<(), String> {
+        if let Ok(mut registry) = self.registry.lock() {
+            if registry.profile(profile_id).is_some() {
+                registry.begin_profile_close(profile_id)?;
+            }
+        }
         self.closing_profiles
             .lock()
             .map_err(|_| "Profile lifecycle state is unavailable.".to_owned())?
@@ -87,6 +123,9 @@ impl NavigationStore {
     }
 
     fn cancel_close(&self, profile_id: &str) {
+        if let Ok(mut registry) = self.registry.lock() {
+            registry.cancel_profile_close(profile_id);
+        }
         if let Ok(mut profiles) = self.closing_profiles.lock() {
             profiles.remove(profile_id);
         }
@@ -178,31 +217,53 @@ fn emit_state(app: &AppHandle, profile_id: &str, state: &NavigationState) {
 
 fn set_loading(app: &AppHandle, profile_id: &str, loading: bool) {
     let store = app.state::<NavigationStore>();
-    if let Ok(mut states) = store.states.lock() {
-        let state = states.entry(profile_id.to_owned()).or_default();
-        state.is_loading = loading;
-        emit_state(app, profile_id, state);
-    };
+    store.with_active_navigation(profile_id, |state| state.loading = loading);
+    emit_state(app, profile_id, &navigation_state(app, profile_id));
 }
 
-fn push_navigation(app: &AppHandle, profile_id: &str, url: &Url) {
+fn set_tab_loading(app: &AppHandle, profile_id: &str, tab_id: &str, loading: bool) {
     let store = app.state::<NavigationStore>();
-    if let Ok(mut states) = store.states.lock() {
-        let state = states.entry(profile_id.to_owned()).or_default();
-        let value = url.to_string();
-        if let Some(history_index) = state.pending_history_index.take() {
-            state.index = Some(history_index);
-        } else if state.current_url.as_deref() != Some(&value) {
-            if let Some(index) = state.index {
-                state.entries.truncate(index + 1);
-            }
-            state.entries.push(value.clone());
-            state.index = Some(state.entries.len() - 1);
-        }
-        state.current_url = Some(value);
-        state.error = None;
-        emit_state(app, profile_id, state);
-    };
+    let updated = store
+        .registry
+        .lock()
+        .ok()
+        .and_then(|mut registry| {
+            registry
+                .navigation_mut(profile_id, tab_id)
+                .map(|state| state.loading = loading)
+        })
+        .is_some();
+    if updated {
+        emit_state(app, profile_id, &navigation_state(app, profile_id));
+    }
+}
+
+fn push_tab_navigation(app: &AppHandle, profile_id: &str, tab_id: &str, url: &Url) {
+    let value = url.to_string();
+    let updated = app
+        .state::<NavigationStore>()
+        .registry
+        .lock()
+        .ok()
+        .and_then(|mut registry| {
+            registry.navigation_mut(profile_id, tab_id).map(|state| {
+                if let Some(history_index) = state.pending_history_index.take() {
+                    state.index = Some(history_index);
+                } else if state.current_url.as_deref() != Some(&value) {
+                    if let Some(index) = state.index {
+                        state.entries.truncate(index + 1);
+                    }
+                    state.entries.push(value.clone());
+                    state.index = Some(state.entries.len() - 1);
+                }
+                state.current_url = Some(value);
+                state.error = None;
+            })
+        })
+        .is_some();
+    if updated {
+        emit_state(app, profile_id, &navigation_state(app, profile_id));
+    }
 }
 
 fn navigation_state(app: &AppHandle, profile_id: &str) -> NavigationState {
@@ -231,6 +292,7 @@ fn browser_window_on_main_thread(
         window
             .set_focus()
             .map_err(|_| "Could not focus the existing browser window.".to_owned())?;
+        app.state::<NavigationStore>().ensure_profile(&profile_id)?;
         return Ok(ProfileLaunch {
             profile_id,
             window_label,
@@ -316,6 +378,7 @@ fn browser_window_on_main_thread(
     window
         .show()
         .map_err(|_| "Could not show the browser window.".to_owned())?;
+    app.state::<NavigationStore>().ensure_profile(&profile_id)?;
 
     Ok(ProfileLaunch {
         profile_id,
@@ -406,6 +469,14 @@ fn ensure_content_webview(app: &AppHandle, profile_id: &str, url: Url) -> Result
         );
         "Open this isolated browser profile before navigating.".to_owned()
     })?;
+    let active_tab_id = app
+        .state::<NavigationStore>()
+        .registry
+        .lock()
+        .map_err(|_| "Browser tab registry is unavailable.".to_owned())?
+        .profile(profile_id)
+        .map(|profile| profile.active_tab_id.clone())
+        .ok_or_else(|| "Open this isolated browser profile before navigating.".to_owned())?;
     if let Some(content) = app.get_webview(&content_label) {
         content.show().map_err(|error| {
             navigation_log(
@@ -445,8 +516,10 @@ fn ensure_content_webview(app: &AppHandle, profile_id: &str, url: Url) -> Result
     let height = size.height as f64 / scale;
     let app_for_navigation = app.clone();
     let navigation_profile = profile_id.to_owned();
+    let navigation_tab = active_tab_id.clone();
     let app_for_load = app.clone();
     let load_profile = profile_id.to_owned();
+    let load_tab = active_tab_id.clone();
     let builder = WebviewBuilder::new(&content_label, WebviewUrl::External(url))
         .data_directory(directory)
         .on_navigation(move |target| {
@@ -456,7 +529,12 @@ fn ensure_content_webview(app: &AppHandle, profile_id: &str, url: Url) -> Result
                     &navigation_profile,
                     &url_log_fields(target),
                 );
-                push_navigation(&app_for_navigation, &navigation_profile, target);
+                push_tab_navigation(
+                    &app_for_navigation,
+                    &navigation_profile,
+                    &navigation_tab,
+                    target,
+                );
                 true
             } else {
                 navigation_log(
@@ -464,13 +542,28 @@ fn ensure_content_webview(app: &AppHandle, profile_id: &str, url: Url) -> Result
                     &navigation_profile,
                     &format!("scheme={}", target.scheme()),
                 );
-                if let Ok(mut states) = app_for_navigation.state::<NavigationStore>().states.lock()
-                {
-                    let state = states.entry(navigation_profile.clone()).or_default();
-                    state.error = Some(
-                        "Navigation was blocked: only HTTP and HTTPS pages are allowed.".into(),
+                let updated = app_for_navigation
+                    .state::<NavigationStore>()
+                    .registry
+                    .lock()
+                    .ok()
+                    .and_then(|mut registry| {
+                        registry
+                            .navigation_mut(&navigation_profile, &navigation_tab)
+                            .map(|state| {
+                                state.error = Some(
+                                    "Navigation was blocked: only HTTP and HTTPS pages are allowed."
+                                        .into(),
+                                );
+                            })
+                    })
+                    .is_some();
+                if updated {
+                    emit_state(
+                        &app_for_navigation,
+                        &navigation_profile,
+                        &navigation_state(&app_for_navigation, &navigation_profile),
                     );
-                    emit_state(&app_for_navigation, &navigation_profile, state);
                 }
                 false
             }
@@ -486,14 +579,15 @@ fn ensure_content_webview(app: &AppHandle, profile_id: &str, url: Url) -> Result
                 .map(|url| url_log_fields(&url))
                 .unwrap_or_else(|_| "url=unparseable".to_owned());
             navigation_log(event_name, &load_profile, &fields);
-            set_loading(
+            set_tab_loading(
                 &app_for_load,
                 &load_profile,
+                &load_tab,
                 matches!(payload.event(), tauri::webview::PageLoadEvent::Started),
             );
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                 if let Ok(current_url) = payload.url().to_string().parse::<Url>() {
-                    push_navigation(&app_for_load, &load_profile, &current_url);
+                    push_tab_navigation(&app_for_load, &load_profile, &load_tab, &current_url);
                 }
             }
         });
@@ -506,20 +600,33 @@ fn ensure_content_webview(app: &AppHandle, profile_id: &str, url: Url) -> Result
             (height - CHROME_HEIGHT).max(100.0)
         ),
     );
-    window
-        .add_child(
-            builder,
-            tauri::LogicalPosition::new(0.0, CHROME_HEIGHT),
-            tauri::LogicalSize::new(width, (height - CHROME_HEIGHT).max(100.0)),
-        )
-        .map_err(|error| {
-            navigation_log(
-                "content_webview_creation_failed",
-                profile_id,
-                &format!("stage=add_child error={error}"),
-            );
-            "Could not create the isolated website WebView2 surface.".to_owned()
-        })?;
+    app.state::<NavigationStore>()
+        .registry
+        .lock()
+        .map_err(|_| "Browser tab registry is unavailable.".to_owned())?
+        .begin_tab_creation(profile_id, &active_tab_id)?;
+    if let Err(error) = window.add_child(
+        builder,
+        tauri::LogicalPosition::new(0.0, CHROME_HEIGHT),
+        tauri::LogicalSize::new(width, (height - CHROME_HEIGHT).max(100.0)),
+    ) {
+        let _ = app
+            .state::<NavigationStore>()
+            .registry
+            .lock()
+            .map(|mut registry| registry.finish_tab_creation(profile_id, &active_tab_id, false));
+        navigation_log(
+            "content_webview_creation_failed",
+            profile_id,
+            &format!("stage=add_child error={error}"),
+        );
+        return Err("Could not create the isolated website WebView2 surface.".to_owned());
+    }
+    app.state::<NavigationStore>()
+        .registry
+        .lock()
+        .map_err(|_| "Browser tab registry is unavailable.".to_owned())?
+        .finish_tab_creation(profile_id, &active_tab_id, true)?;
 
     match app.get_webview(&content_label) {
         Some(content) => {
@@ -630,7 +737,6 @@ fn browser_state(
     if app.get_webview(&content_label).is_none() {
         // A newly opened chrome has no website child until its first navigation.
         // Never expose history left behind by a previous window lifecycle.
-        app.state::<NavigationStore>().reset_profile(&profile_id);
         return Ok(NavigationState::default());
     }
     Ok(navigation_state(&app, &profile_id))
@@ -640,29 +746,29 @@ fn browser_state(
 fn browser_back(app: AppHandle, webview: Webview, profile_id: String) -> Result<(), String> {
     require_profile_chrome(&webview, &profile_id)?;
     let (_, _, content_label) = browser_labels(&profile_id)?;
-    let store = app.state::<NavigationStore>();
-    let mut states = store
-        .states
-        .lock()
-        .map_err(|_| "Navigation state is unavailable.".to_owned())?;
-    let state = states.entry(profile_id.clone()).or_default();
-    let Some(index) = state.index else {
-        return Err("There is no previous page.".into());
-    };
-    if index == 0 {
-        return Err("There is no previous page.".into());
-    }
-    state.index = Some(index - 1);
-    state.pending_history_index = Some(index - 1);
-    if let Some(url) = state.entries.get(index - 1) {
-        state.current_url = Some(url.clone());
-    }
-    if let Some(content) = app.get_webview(&content_label) {
-        content
-            .eval("history.back()")
-            .map_err(|_| "Could not navigate back.".to_owned())?;
-    }
-    emit_state(&app, &profile_id, state);
+    let update = app
+        .state::<NavigationStore>()
+        .with_active_navigation(&profile_id, |state| {
+            let index = state
+                .index
+                .ok_or_else(|| "There is no previous page.".to_owned())?;
+            if index == 0 {
+                return Err("There is no previous page.".to_owned());
+            }
+            state.index = Some(index - 1);
+            state.pending_history_index = Some(index - 1);
+            if let Some(url) = state.entries.get(index - 1) {
+                state.current_url = Some(url.clone());
+            }
+            Ok(())
+        })
+        .ok_or_else(|| "Navigation state is unavailable.".to_owned())?;
+    update?;
+    app.get_webview(&content_label)
+        .ok_or_else(|| "No page is open to navigate back.".to_owned())?
+        .eval("history.back()")
+        .map_err(|_| "Could not navigate back.".to_owned())?;
+    emit_state(&app, &profile_id, &navigation_state(&app, &profile_id));
     Ok(())
 }
 
@@ -670,29 +776,29 @@ fn browser_back(app: AppHandle, webview: Webview, profile_id: String) -> Result<
 fn browser_forward(app: AppHandle, webview: Webview, profile_id: String) -> Result<(), String> {
     require_profile_chrome(&webview, &profile_id)?;
     let (_, _, content_label) = browser_labels(&profile_id)?;
-    let store = app.state::<NavigationStore>();
-    let mut states = store
-        .states
-        .lock()
-        .map_err(|_| "Navigation state is unavailable.".to_owned())?;
-    let state = states.entry(profile_id.clone()).or_default();
-    let Some(index) = state.index else {
-        return Err("There is no next page.".into());
-    };
-    if index + 1 >= state.entries.len() {
-        return Err("There is no next page.".into());
-    }
-    state.index = Some(index + 1);
-    state.pending_history_index = Some(index + 1);
-    if let Some(url) = state.entries.get(index + 1) {
-        state.current_url = Some(url.clone());
-    }
-    if let Some(content) = app.get_webview(&content_label) {
-        content
-            .eval("history.forward()")
-            .map_err(|_| "Could not navigate forward.".to_owned())?;
-    }
-    emit_state(&app, &profile_id, state);
+    let update = app
+        .state::<NavigationStore>()
+        .with_active_navigation(&profile_id, |state| {
+            let index = state
+                .index
+                .ok_or_else(|| "There is no next page.".to_owned())?;
+            if index + 1 >= state.entries.len() {
+                return Err("There is no next page.".to_owned());
+            }
+            state.index = Some(index + 1);
+            state.pending_history_index = Some(index + 1);
+            if let Some(url) = state.entries.get(index + 1) {
+                state.current_url = Some(url.clone());
+            }
+            Ok(())
+        })
+        .ok_or_else(|| "Navigation state is unavailable.".to_owned())?;
+    update?;
+    app.get_webview(&content_label)
+        .ok_or_else(|| "No page is open to navigate forward.".to_owned())?
+        .eval("history.forward()")
+        .map_err(|_| "Could not navigate forward.".to_owned())?;
+    emit_state(&app, &profile_id, &navigation_state(&app, &profile_id));
     Ok(())
 }
 
@@ -815,36 +921,23 @@ mod tests {
     #[test]
     fn closing_and_reopening_alpha_clears_only_alpha_navigation_state() {
         let store = NavigationStore::default();
-        {
-            let mut states = store.states.lock().unwrap();
-            states.insert(
-                "alpha".into(),
-                NavigationState {
-                    current_url: Some("https://old-alpha.example/".into()),
-                    entries: vec!["https://old-alpha.example/".into()],
-                    index: Some(0),
-                    is_loading: false,
-                    error: None,
-                    pending_history_index: None,
-                },
-            );
-            states.insert(
-                "beta".into(),
-                NavigationState {
-                    current_url: Some("https://beta.example/".into()),
-                    entries: vec!["https://beta.example/".into()],
-                    index: Some(0),
-                    is_loading: false,
-                    error: None,
-                    pending_history_index: None,
-                },
-            );
-        }
+        store.ensure_profile("alpha").unwrap();
+        store.ensure_profile("beta").unwrap();
+        store.with_active_navigation("alpha", |state| {
+            state.current_url = Some("https://old-alpha.example/".into());
+            state.entries.push("https://old-alpha.example/".into());
+            state.index = Some(0);
+        });
+        store.with_active_navigation("beta", |state| {
+            state.current_url = Some("https://beta.example/".into());
+            state.entries.push("https://beta.example/".into());
+            state.index = Some(0);
+        });
 
         store.mark_closing("alpha").unwrap();
         assert!(store.is_closing("alpha").unwrap());
         assert!(!store.is_closing("beta").unwrap());
-        store.reset_profile("alpha");
+        store.finish_close("alpha");
 
         assert_eq!(store.state_or_default("alpha"), NavigationState::default());
         assert_eq!(
@@ -852,22 +945,13 @@ mod tests {
             Some("https://beta.example/")
         );
 
-        store.finish_close("alpha");
         assert!(!store.is_closing("alpha").unwrap());
-        {
-            let mut states = store.states.lock().unwrap();
-            states.insert(
-                "alpha".into(),
-                NavigationState {
-                    current_url: Some("https://new-alpha.example/".into()),
-                    entries: vec!["https://new-alpha.example/".into()],
-                    index: Some(0),
-                    is_loading: false,
-                    error: None,
-                    pending_history_index: None,
-                },
-            );
-        }
+        store.ensure_profile("alpha").unwrap();
+        store.with_active_navigation("alpha", |state| {
+            state.current_url = Some("https://new-alpha.example/".into());
+            state.entries.push("https://new-alpha.example/".into());
+            state.index = Some(0);
+        });
         assert_eq!(
             store.state_or_default("alpha").current_url.as_deref(),
             Some("https://new-alpha.example/")
@@ -881,56 +965,34 @@ mod tests {
     #[test]
     fn closing_and_reopening_beta_clears_only_beta_navigation_state() {
         let store = NavigationStore::default();
-        {
-            let mut states = store.states.lock().unwrap();
-            states.insert(
-                "alpha".into(),
-                NavigationState {
-                    current_url: Some("https://alpha.example/".into()),
-                    entries: vec!["https://alpha.example/".into()],
-                    index: Some(0),
-                    is_loading: false,
-                    error: None,
-                    pending_history_index: None,
-                },
-            );
-            states.insert(
-                "beta".into(),
-                NavigationState {
-                    current_url: Some("https://old-beta.example/".into()),
-                    entries: vec!["https://old-beta.example/".into()],
-                    index: Some(0),
-                    is_loading: false,
-                    error: None,
-                    pending_history_index: None,
-                },
-            );
-        }
+        store.ensure_profile("alpha").unwrap();
+        store.ensure_profile("beta").unwrap();
+        store.with_active_navigation("alpha", |state| {
+            state.current_url = Some("https://alpha.example/".into());
+            state.entries.push("https://alpha.example/".into());
+            state.index = Some(0);
+        });
+        store.with_active_navigation("beta", |state| {
+            state.current_url = Some("https://old-beta.example/".into());
+            state.entries.push("https://old-beta.example/".into());
+            state.index = Some(0);
+        });
 
         store.mark_closing("beta").unwrap();
-        store.reset_profile("beta");
+        store.finish_close("beta");
         assert_eq!(store.state_or_default("beta"), NavigationState::default());
         assert_eq!(
             store.state_or_default("alpha").current_url.as_deref(),
             Some("https://alpha.example/")
         );
 
-        store.finish_close("beta");
         assert!(!store.is_closing("beta").unwrap());
-        {
-            let mut states = store.states.lock().unwrap();
-            states.insert(
-                "beta".into(),
-                NavigationState {
-                    current_url: Some("https://new-beta.example/".into()),
-                    entries: vec!["https://new-beta.example/".into()],
-                    index: Some(0),
-                    is_loading: false,
-                    error: None,
-                    pending_history_index: None,
-                },
-            );
-        }
+        store.ensure_profile("beta").unwrap();
+        store.with_active_navigation("beta", |state| {
+            state.current_url = Some("https://new-beta.example/".into());
+            state.entries.push("https://new-beta.example/".into());
+            state.index = Some(0);
+        });
         assert_eq!(
             store.state_or_default("beta").current_url.as_deref(),
             Some("https://new-beta.example/")

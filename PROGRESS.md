@@ -2,7 +2,17 @@
 
 ## Current milestone
 
-**Mission 002A — Native navigation and profile lifecycle implementation verified; awaiting commit approval.**
+**Mission 002B.1a — Tab registry and per-tab state model implemented; awaiting review.**
+
+### Mission 002B.1a — Registry model
+
+- Added a Rust `BrowserRegistry` with profile lifecycle, ordered stable tab IDs, active-tab selection, per-tab WebView labels, metadata, and independent navigation state.
+- Added model operations for initial profile tabs, adding/selecting/closing tabs, neighboring-tab selection, creation lifecycle, profile close/removal, ownership validation, and stale-tab callback rejection.
+- Wired the existing Alpha/Beta navigation store to each profile's initial registry tab. Existing native windows and single website WebViews remain unchanged; additional native tabs and UI are not implemented in this milestone.
+- Alpha and Beta retain their existing WebView2 data-directory mapping. The registry is process-local and does not persist tabs across application restarts.
+- Automated Rust tests: 12 passed. `npm run build`, `cargo fmt --check`, `cargo build`, and `git diff --check` passed. Native UI verification for additional tabs is not applicable because native multi-tab creation is explicitly out of scope.
+- Changed files: `src-tauri/src/main.rs`, `src-tauri/src/tabs.rs`, and this progress record.
+- Next task, only after approval: Mission 002B.1b — native child WebView lifecycle and tab UI integration.
 
 ## Architecture
 
@@ -54,7 +64,7 @@ Tauri 2 + Wry + WebView2 Runtime. Each Alpha/Beta website webview uses its exist
 - GitHub repository: [https://github.com/Pragadeesh-asp/levi-browser](https://github.com/Pragadeesh-asp/levi-browser); previously verified private, owned by `Pragadeesh-asp`, default branch `main`.
 - Remote: `origin` → `https://github.com/Pragadeesh-asp/levi-browser.git`.
 - Branch: `main` tracks `origin/main`.
-- Mission 002A remains uncommitted and unpushed pending user review and explicit commit approval.
+- Mission 002A was committed and pushed as `a19432fda30344f3da7a62400ddf36a8bddc17bc`; this Mission 002B.1a work is currently uncommitted and unpushed.
 - Retained Alpha/Beta test UDFs are outside this repository under `%LOCALAPPDATA%\com.levi.browser.foundation\profile-isolation-lab\alpha` and `...\beta`; they were not moved, deleted or reset. The app-local `EBWebView` directory remains untouched.
 - Next task: obtain approval for the reviewed Mission 002A checkpoint. Do not start Mission 002B.
 
