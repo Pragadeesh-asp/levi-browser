@@ -21,8 +21,43 @@ const INITIAL_WIDTH: f64 = 1120.0;
 const INITIAL_HEIGHT: f64 = 760.0;
 
 fn navigation_log(event: &str, profile_id: &str, details: &str) {
-    // Keep navigation logs useful without recording URL paths, queries, or page content.
-    eprintln!("[LEVI_DIAG] event={event} profile={profile_id} {details}");
+    // Never record URL paths, queries or page content. Success events can name
+    // a website host (url_log_fields), so they log at debug level, which the
+    // log file drops; *_failed events carry error text only and are warnings.
+    let level = if event.ends_with("_failed") {
+        log::Level::Warn
+    } else {
+        log::Level::Debug
+    };
+    log::log!(
+        level,
+        "[LEVI_DIAG] event={event} profile={profile_id} {details}"
+    );
+}
+
+/// Console plus rotating files in the app log folder
+/// (%LOCALAPPDATA%\com.levi.browser.foundation\logs on Windows). Debug builds
+/// also print navigation diagnostics to the console; the file keeps info and
+/// above only, so visited hosts never land on disk.
+fn log_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
+    let own_level = if cfg!(debug_assertions) {
+        log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Info
+    };
+    tauri_plugin_log::Builder::new()
+        .targets([
+            Target::new(TargetKind::Stdout),
+            Target::new(TargetKind::LogDir { file_name: None })
+                .filter(|metadata| metadata.level() <= log::Level::Info),
+        ])
+        .level(log::LevelFilter::Info)
+        .level_for("levi_browser_foundation", own_level)
+        .max_file_size(5 * 1024 * 1024)
+        .rotation_strategy(RotationStrategy::KeepSome(5))
+        .timezone_strategy(TimezoneStrategy::UseLocal)
+        .build()
 }
 
 fn url_log_fields(url: &Url) -> String {
@@ -1473,6 +1508,7 @@ fn show_profile_manager(
 
 fn main() {
     tauri::Builder::default()
+        .plugin(log_plugin())
         .manage(NavigationStore::default())
         .setup(|app| {
             let catalog = app
