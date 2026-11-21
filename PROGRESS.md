@@ -1,5 +1,16 @@
 # LEVI BROWSER Progress
 
+## Week 1 stabilization (2026-11-22)
+
+Branch `wip/week1-stabilize` (local; not pushed). It starts from `a80f217`, a snapshot of all previously uncommitted work (profile management, LEVI theme, tab work). `artifacts/` screenshots stay untracked.
+
+- **New profiles can receive browser events.** `capabilities/browser-chrome.json` listed only `chrome-alpha` and `chrome-beta`, so a profile created with "Add Profile" (chrome label `chrome-p-…`) had its `listen()` calls rejected, `refresh()` never ran and the tab strip stayed empty. It now matches `chrome-*`; website content webviews are labeled `content-*` and stay excluded. A Rust test checks generated labels against the capability file.
+- **Log files without browsing history.** Navigation diagnostics now go through `tauri-plugin-log`. Failures log as warnings; success events, which can name a website host, log at debug level. The rotating file in `%LOCALAPPDATA%\com.levi.browser.foundation\logs` keeps info and above only, so visited hosts are never written to disk. Debug builds still print the diagnostics to the console.
+- **Type-checking and lint.** Added TypeScript 7.0 (same as Command Center) with a strict `tsconfig.json`, oxlint, and `typecheck`/`lint` scripts; `npm run build` now type-checks first. The first check found an unused `navigationState` variable and `profileMenu.hidden` (typed `boolean | "until-found"`) passed as a boolean; both are fixed.
+- **Repository hygiene.** `.gitattributes` (LF everywhere; no files changed) and a GitHub Actions workflow on `windows-latest`: `npm ci`, type-check + build, oxlint, `cargo fmt --check`, clippy, `cargo test`.
+- **Checks passed:** `npm run build` (with `tsc`), `npm run lint`, `cargo fmt --check`, 21 Rust tests. Clippy shows the 2 existing style warnings.
+- **Not verified:** creating a new profile in the native app and seeing its tab strip load (the fix is confirmed against Tauri 2.12's capability rules and by test, not by a native run), and the CI workflow on GitHub (branch not pushed). The audit's history, popup, download and session-restore items are not part of this milestone.
+
 ## Premium desktop UI and profile management update (2026-11-17)
 
 - Updated Browser chrome tokens to Gunmetal Black `#1C2126`, Lunar White `#F4F4F0`, and Neon Lime `#C7F000`; the same values are used by Command Center. Native website WebViews remain separate and are not themed or injected.
