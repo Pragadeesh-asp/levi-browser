@@ -1,0 +1,7 @@
+@property --levi-address-angle{syntax:"<angle>";inherits:false;initial-value:0deg}
+.browser-address-beam{position:relative;isolation:isolate}
+.browser-address-beam::after{content:"";position:absolute;z-index:2;inset:-1px;border:1px solid transparent;border-radius:inherit;pointer-events:none;opacity:0;background:conic-gradient(from var(--levi-address-angle),transparent 0 72%,#1646a0 80%,#7dcef5 88%,#dc2638 94%,transparent 100%) border-box;-webkit-mask:linear-gradient(#fff 0 0) padding-box,linear-gradient(#fff 0 0);-webkit-mask-composite:xor;mask-composite:exclude;transition:opacity 180ms ease}
+.browser-address-beam:focus-within::after{opacity:.9;animation:levi-address-beam-turn 3.4s linear infinite}
+.browser-address-beam:focus-within{border-color:rgba(125,206,245,.58);box-shadow:0 0 0 3px rgba(22,70,160,.2),inset 0 1px 5px #0005}
+@keyframes levi-address-beam-turn{to{--levi-address-angle:360deg}}
+@media(prefers-reduced-motion:reduce){.browser-address-beam:focus-within::after{animation:none;opacity:.45;transition:none}}

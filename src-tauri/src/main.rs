@@ -1,7 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::Serialize;
-use std::{fs, path::PathBuf, sync::Mutex};
+use std::{collections::HashSet, fs, path::PathBuf, sync::Mutex};
+use tauri::webview::NewWindowResponse;
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     webview::WebviewBuilder,
@@ -12,8 +13,10 @@ use url::Url;
 #[allow(dead_code)] // Registry operations are intentionally model-only until Mission 002B.1b.
 mod tabs;
 use tabs::BrowserRegistry;
+mod profiles;
+use profiles::{BrowserProfile, ProfileStore};
 
-const CHROME_HEIGHT: f64 = 96.0;
+const CHROME_HEIGHT: f64 = 132.0;
 const INITIAL_WIDTH: f64 = 1120.0;
 const INITIAL_HEIGHT: f64 = 760.0;
 
@@ -34,6 +37,8 @@ fn url_log_fields(url: &Url) -> String {
 struct NavigationStore {
     registry: Mutex<BrowserRegistry>,
     closing_profiles: Mutex<std::collections::HashSet<String>>,
+    resize_profiles: Mutex<HashSet<String>>,
+    native_ops: tokio::sync::Mutex<()>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -45,6 +50,13 @@ struct NavigationState {
     is_loading: bool,
     error: Option<String>,
     pending_history_index: Option<usize>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileNavigationEvent<'a> {
+    profile_id: &'a str,
+    state: &'a NavigationState,
 }
 
 impl From<tabs::TabNavigation> for NavigationState {
@@ -77,14 +89,15 @@ impl NavigationStore {
     }
 
     fn ensure_profile(&self, profile_id: &str) -> Result<(), String> {
-        let (window, chrome, content) = browser_labels(profile_id)?;
+        let (window, chrome, _) = browser_labels(profile_id)?;
         self.registry
             .lock()
             .map_err(|_| "Browser tab registry is unavailable.".to_owned())?
-            .open_profile(profile_id, window, chrome, content)?;
+            .open_profile_generated(profile_id, window, chrome)?;
         Ok(())
     }
 
+    #[cfg(test)]
     fn with_active_navigation<R>(
         &self,
         profile_id: &str,
@@ -120,6 +133,9 @@ impl NavigationStore {
         if let Ok(mut profiles) = self.closing_profiles.lock() {
             profiles.remove(profile_id);
         }
+        if let Ok(mut profiles) = self.resize_profiles.lock() {
+            profiles.remove(profile_id);
+        }
     }
 
     fn cancel_close(&self, profile_id: &str) {
@@ -142,23 +158,34 @@ struct ProfileLaunch {
 }
 
 fn profile_details(app: &AppHandle, profile_id: &str) -> Result<(String, PathBuf), String> {
-    let profile = match profile_id {
-        "alpha" => "alpha",
-        "beta" => "beta",
-        _ => return Err("Choose one of the two isolated test profiles.".into()),
-    };
+    let profile = app.state::<ProfileStore>().get(profile_id)?;
+    if !valid_profile_id(profile_id) {
+        return Err("That browser profile identifier is invalid.".into());
+    }
     let path = app
         .path()
         .app_local_data_dir()
         .map_err(|_| "Could not resolve LEVI Browser local data directory.".to_owned())?
-        .join("profile-isolation-lab")
-        .join(profile);
-    Ok((format!("profile-{profile}"), path))
+        .join(if matches!(profile_id, "alpha" | "beta") {
+            "profile-isolation-lab"
+        } else {
+            "profiles"
+        })
+        .join(&profile.id);
+    Ok((format!("profile-{}", profile.id), path))
+}
+
+fn valid_profile_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 80
+        && id
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
 }
 
 fn browser_labels(profile_id: &str) -> Result<(String, String, String), String> {
-    if !matches!(profile_id, "alpha" | "beta") {
-        return Err("Choose one of the two isolated test profiles.".into());
+    if !valid_profile_id(profile_id) {
+        return Err("That browser profile identifier is invalid.".into());
     }
     Ok((
         format!("browser-{profile_id}"),
@@ -195,7 +222,7 @@ fn emit_state(app: &AppHandle, profile_id: &str, state: &NavigationState) {
     match app.emit_to(
         tauri::EventTarget::webview(chrome_label),
         "browser:navigation-state",
-        state,
+        ProfileNavigationEvent { profile_id, state },
     ) {
         Ok(()) => navigation_log(
             "address_state_event_emitted",
@@ -215,13 +242,41 @@ fn emit_state(app: &AppHandle, profile_id: &str, state: &NavigationState) {
     }
 }
 
-fn set_loading(app: &AppHandle, profile_id: &str, loading: bool) {
-    let store = app.state::<NavigationStore>();
-    store.with_active_navigation(profile_id, |state| state.loading = loading);
-    emit_state(app, profile_id, &navigation_state(app, profile_id));
+fn emit_tabs_state(app: &AppHandle, profile_id: &str) {
+    let state = app.state::<NavigationStore>();
+    let snapshot = state
+        .registry
+        .lock()
+        .ok()
+        .and_then(|registry| registry.profile_tabs_snapshot(profile_id).ok());
+    if let Some(snapshot) = snapshot {
+        if let Ok((_, chrome, _)) = browser_labels(profile_id) {
+            let _ = app.emit_to(
+                tauri::EventTarget::webview(chrome),
+                "browser:tabs-state",
+                snapshot,
+            );
+        }
+    }
 }
 
-fn set_tab_loading(app: &AppHandle, profile_id: &str, tab_id: &str, loading: bool) {
+fn navigation_state_for(app: &AppHandle, profile_id: &str, tab_id: &str) -> NavigationState {
+    app.state::<NavigationStore>()
+        .registry
+        .lock()
+        .ok()
+        .and_then(|registry| registry.navigation_snapshot(profile_id, tab_id).ok())
+        .map(NavigationState::from)
+        .unwrap_or_default()
+}
+
+fn set_tab_loading(
+    app: &AppHandle,
+    profile_id: &str,
+    tab_id: &str,
+    generation: u64,
+    loading: bool,
+) {
     let store = app.state::<NavigationStore>();
     let updated = store
         .registry
@@ -229,16 +284,39 @@ fn set_tab_loading(app: &AppHandle, profile_id: &str, tab_id: &str, loading: boo
         .ok()
         .and_then(|mut registry| {
             registry
-                .navigation_mut(profile_id, tab_id)
+                .navigation_mut_generation(profile_id, tab_id, generation)
                 .map(|state| state.loading = loading)
         })
         .is_some();
     if updated {
-        emit_state(app, profile_id, &navigation_state(app, profile_id));
+        emit_tabs_state(app, profile_id);
+        let active = app
+            .state::<NavigationStore>()
+            .registry
+            .lock()
+            .ok()
+            .and_then(|registry| {
+                registry
+                    .profile(profile_id)
+                    .map(|p| p.active_tab_id.clone())
+            });
+        if active.as_deref() == Some(tab_id) {
+            emit_state(
+                app,
+                profile_id,
+                &navigation_state_for(app, profile_id, tab_id),
+            );
+        }
     }
 }
 
-fn push_tab_navigation(app: &AppHandle, profile_id: &str, tab_id: &str, url: &Url) {
+fn push_tab_navigation(
+    app: &AppHandle,
+    profile_id: &str,
+    tab_id: &str,
+    generation: u64,
+    url: &Url,
+) {
     let value = url.to_string();
     let updated = app
         .state::<NavigationStore>()
@@ -246,23 +324,42 @@ fn push_tab_navigation(app: &AppHandle, profile_id: &str, tab_id: &str, url: &Ur
         .lock()
         .ok()
         .and_then(|mut registry| {
-            registry.navigation_mut(profile_id, tab_id).map(|state| {
-                if let Some(history_index) = state.pending_history_index.take() {
-                    state.index = Some(history_index);
-                } else if state.current_url.as_deref() != Some(&value) {
-                    if let Some(index) = state.index {
-                        state.entries.truncate(index + 1);
+            registry
+                .navigation_mut_generation(profile_id, tab_id, generation)
+                .map(|state| {
+                    if let Some(history_index) = state.pending_history_index.take() {
+                        state.index = Some(history_index);
+                    } else if state.current_url.as_deref() != Some(&value) {
+                        if let Some(index) = state.index {
+                            state.entries.truncate(index + 1);
+                        }
+                        state.entries.push(value.clone());
+                        state.index = Some(state.entries.len() - 1);
                     }
-                    state.entries.push(value.clone());
-                    state.index = Some(state.entries.len() - 1);
-                }
-                state.current_url = Some(value);
-                state.error = None;
-            })
+                    state.current_url = Some(value);
+                    state.error = None;
+                })
         })
         .is_some();
     if updated {
-        emit_state(app, profile_id, &navigation_state(app, profile_id));
+        emit_tabs_state(app, profile_id);
+        let active = app
+            .state::<NavigationStore>()
+            .registry
+            .lock()
+            .ok()
+            .and_then(|registry| {
+                registry
+                    .profile(profile_id)
+                    .map(|p| p.active_tab_id.clone())
+            });
+        if active.as_deref() == Some(tab_id) {
+            emit_state(
+                app,
+                profile_id,
+                &navigation_state_for(app, profile_id, tab_id),
+            );
+        }
     }
 }
 
@@ -293,6 +390,8 @@ fn browser_window_on_main_thread(
             .set_focus()
             .map_err(|_| "Could not focus the existing browser window.".to_owned())?;
         app.state::<NavigationStore>().ensure_profile(&profile_id)?;
+        register_resize_handler(&app, &profile_id)?;
+        emit_tabs_state(&app, &profile_id);
         return Ok(ProfileLaunch {
             profile_id,
             window_label,
@@ -357,12 +456,12 @@ fn browser_window_on_main_thread(
 
     #[cfg(debug_assertions)]
     let chrome_url = WebviewUrl::External(
-        format!("http://127.0.0.1:4173/browser-{profile_id}.html")
+        format!("http://127.0.0.1:4173/browser-profile.html?profile={profile_id}")
             .parse()
             .map_err(|_| "Could not construct the local browser chrome URL.".to_owned())?,
     );
     #[cfg(not(debug_assertions))]
-    let chrome_url = WebviewUrl::App(format!("browser-{profile_id}.html").into());
+    let chrome_url = WebviewUrl::App(format!("browser-profile.html?profile={profile_id}").into());
 
     window
         .add_child(
@@ -379,6 +478,8 @@ fn browser_window_on_main_thread(
         .show()
         .map_err(|_| "Could not show the browser window.".to_owned())?;
     app.state::<NavigationStore>().ensure_profile(&profile_id)?;
+    register_resize_handler(&app, &profile_id)?;
+    emit_tabs_state(&app, &profile_id);
 
     Ok(ProfileLaunch {
         profile_id,
@@ -393,8 +494,11 @@ async fn open_profile(
     app: AppHandle,
     webview: Webview,
     profile_id: String,
+    current_profile_id: Option<String>,
 ) -> Result<ProfileLaunch, String> {
-    require_local_shell(&webview, None)?;
+    require_local_shell(&webview, current_profile_id.as_deref())?;
+    let store = app.state::<NavigationStore>();
+    let _operation = store.native_ops.lock().await;
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let main_app = app.clone();
     app.run_on_main_thread(move || {
@@ -451,61 +555,77 @@ fn looks_like_domain(input: &str) -> bool {
         || host_or_host_path.parse::<std::net::IpAddr>().is_ok()
 }
 
-fn ensure_content_webview(app: &AppHandle, profile_id: &str, url: Url) -> Result<(), String> {
-    let (window_label, chrome_label, content_label) = browser_labels(profile_id)?;
-    navigation_log(
-        "content_webview_creation_requested",
-        profile_id,
-        &format!("label={content_label} {}", url_log_fields(&url)),
-    );
+fn register_resize_handler(app: &AppHandle, profile_id: &str) -> Result<(), String> {
+    let (window_label, chrome_label, _) = browser_labels(profile_id)?;
+    let window = app
+        .get_window(&window_label)
+        .ok_or_else(|| "The profile window is unavailable.".to_owned())?;
+    let inserted = app
+        .state::<NavigationStore>()
+        .resize_profiles
+        .lock()
+        .map_err(|_| "Browser resize state is unavailable.".to_owned())?
+        .insert(profile_id.to_owned());
+    if !inserted {
+        return Ok(());
+    }
+    let resize_app = app.clone();
+    let resize_profile = profile_id.to_owned();
+    window.on_window_event(move |event| {
+        let tauri::WindowEvent::Resized(physical) = event else {
+            return;
+        };
+        let scale = resize_app
+            .get_window(&window_label)
+            .and_then(|win| win.scale_factor().ok())
+            .unwrap_or(1.0);
+        let width = physical.width as f64 / scale;
+        let height = physical.height as f64 / scale;
+        if let Some(chrome) = resize_app.get_webview(&chrome_label) {
+            let _ = chrome.set_size(tauri::LogicalSize::new(width, height));
+        }
+        let labels = resize_app
+            .state::<NavigationStore>()
+            .registry
+            .lock()
+            .ok()
+            .and_then(|registry| registry.profile_tabs_snapshot(&resize_profile).ok())
+            .map(|snapshot| {
+                snapshot
+                    .tabs
+                    .into_iter()
+                    .map(|tab| (tab.webview_label, tab.lifecycle == "ready"))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for (label, ready) in labels {
+            if ready {
+                if let Some(content) = resize_app.get_webview(&label) {
+                    let _ = content.set_position(tauri::LogicalPosition::new(0.0, CHROME_HEIGHT));
+                    let _ = content.set_size(tauri::LogicalSize::new(
+                        width,
+                        (height - CHROME_HEIGHT).max(100.0),
+                    ));
+                }
+            }
+        }
+    });
+    Ok(())
+}
+
+fn ensure_content_webview(
+    app: &AppHandle,
+    profile_id: &str,
+    tab_id: &str,
+    url: Url,
+) -> Result<String, String> {
+    let (window_label, _, _) = browser_labels(profile_id)?;
     let (_, directory) = profile_details(app, profile_id)?;
     fs::create_dir_all(&directory)
         .map_err(|_| "Could not create the isolated profile data directory.".to_owned())?;
-    let window = app.get_window(&window_label).ok_or_else(|| {
-        navigation_log(
-            "content_webview_creation_failed",
-            profile_id,
-            "reason=parent_window_unavailable",
-        );
-        "Open this isolated browser profile before navigating.".to_owned()
-    })?;
-    let active_tab_id = app
-        .state::<NavigationStore>()
-        .registry
-        .lock()
-        .map_err(|_| "Browser tab registry is unavailable.".to_owned())?
-        .profile(profile_id)
-        .map(|profile| profile.active_tab_id.clone())
+    let window = app
+        .get_window(&window_label)
         .ok_or_else(|| "Open this isolated browser profile before navigating.".to_owned())?;
-    if let Some(content) = app.get_webview(&content_label) {
-        content.show().map_err(|error| {
-            navigation_log(
-                "content_webview_show_failed",
-                profile_id,
-                &format!("stage=reuse error={error}"),
-            );
-            "The website surface could not be shown.".to_owned()
-        })?;
-        navigation_log(
-            "content_webview_reused_and_shown",
-            profile_id,
-            &format!(
-                "label={content_label} parent_visible={:?}",
-                window.is_visible()
-            ),
-        );
-        content.navigate(url.clone()).map_err(|error| {
-            navigation_log(
-                "navigation_request_failed",
-                profile_id,
-                &format!("{} error={error}", url_log_fields(&url)),
-            );
-            "The website navigation request could not be sent.".to_owned()
-        })?;
-        navigation_log("navigation_request_sent", profile_id, &url_log_fields(&url));
-        return Ok(());
-    }
-
     let size = window
         .inner_size()
         .map_err(|_| "Could not read browser window size.".to_owned())?;
@@ -514,97 +634,143 @@ fn ensure_content_webview(app: &AppHandle, profile_id: &str, url: Url) -> Result
         .map_err(|_| "Could not read browser window scaling.".to_owned())?;
     let width = size.width as f64 / scale;
     let height = size.height as f64 / scale;
-    let app_for_navigation = app.clone();
-    let navigation_profile = profile_id.to_owned();
-    let navigation_tab = active_tab_id.clone();
-    let app_for_load = app.clone();
-    let load_profile = profile_id.to_owned();
-    let load_tab = active_tab_id.clone();
-    let builder = WebviewBuilder::new(&content_label, WebviewUrl::External(url))
+    let reservation = app
+        .state::<NavigationStore>()
+        .registry
+        .lock()
+        .map_err(|_| "Browser tab registry is unavailable.".to_owned())?
+        .reserve_creation(profile_id, tab_id)?;
+    navigation_log(
+        "content_webview_creation_requested",
+        profile_id,
+        &format!(
+            "tab={} label={} {}",
+            reservation.tab_id,
+            reservation.webview_label,
+            url_log_fields(&url)
+        ),
+    );
+    if let Some(orphan) = app.get_webview(&reservation.webview_label) {
+        let _ = orphan.close();
+        let _ = app
+            .state::<NavigationStore>()
+            .registry
+            .lock()
+            .map(|mut registry| registry.complete_creation(profile_id, &reservation, false));
+        return Err("A stale native tab surface was found and closed. Retry navigation.".into());
+    }
+    let app_navigation = app.clone();
+    let profile_navigation = profile_id.to_owned();
+    let tab_navigation = reservation.tab_id.clone();
+    let generation_navigation = reservation.generation;
+    let app_load = app.clone();
+    let profile_load = profile_id.to_owned();
+    let tab_load = reservation.tab_id.clone();
+    let generation_load = reservation.generation;
+    let app_title = app.clone();
+    let profile_title = profile_id.to_owned();
+    let tab_title = reservation.tab_id.clone();
+    let generation_title = reservation.generation;
+    let builder = WebviewBuilder::new(&reservation.webview_label, WebviewUrl::External(url))
         .data_directory(directory)
+        .on_new_window(|_, _| NewWindowResponse::Deny)
         .on_navigation(move |target| {
             if matches!(target.scheme(), "http" | "https") {
-                navigation_log(
-                    "navigation_started",
-                    &navigation_profile,
-                    &url_log_fields(target),
-                );
                 push_tab_navigation(
-                    &app_for_navigation,
-                    &navigation_profile,
-                    &navigation_tab,
+                    &app_navigation,
+                    &profile_navigation,
+                    &tab_navigation,
+                    generation_navigation,
                     target,
                 );
                 true
             } else {
-                navigation_log(
-                    "navigation_blocked",
-                    &navigation_profile,
-                    &format!("scheme={}", target.scheme()),
-                );
-                let updated = app_for_navigation
+                let updated = app_navigation
                     .state::<NavigationStore>()
                     .registry
                     .lock()
                     .ok()
-                    .and_then(|mut registry| {
-                        registry
-                            .navigation_mut(&navigation_profile, &navigation_tab)
-                            .map(|state| {
-                                state.error = Some(
-                                    "Navigation was blocked: only HTTP and HTTPS pages are allowed."
-                                        .into(),
-                                );
-                            })
-                    })
-                    .is_some();
+                    .is_some_and(|mut registry| {
+                        if let Some(state) = registry.navigation_mut_generation(
+                            &profile_navigation,
+                            &tab_navigation,
+                            generation_navigation,
+                        ) {
+                            state.error = Some(
+                                "Navigation was blocked: only HTTP and HTTPS pages are allowed."
+                                    .into(),
+                            );
+                            true
+                        } else {
+                            false
+                        }
+                    });
                 if updated {
-                    emit_state(
-                        &app_for_navigation,
-                        &navigation_profile,
-                        &navigation_state(&app_for_navigation, &navigation_profile),
-                    );
+                    emit_tabs_state(&app_navigation, &profile_navigation);
+                    let active = app_navigation
+                        .state::<NavigationStore>()
+                        .registry
+                        .lock()
+                        .ok()
+                        .and_then(|registry| {
+                            registry
+                                .profile(&profile_navigation)
+                                .map(|p| p.active_tab_id.clone())
+                        });
+                    if active.as_deref() == Some(tab_navigation.as_str()) {
+                        emit_state(
+                            &app_navigation,
+                            &profile_navigation,
+                            &navigation_state_for(
+                                &app_navigation,
+                                &profile_navigation,
+                                &tab_navigation,
+                            ),
+                        );
+                    }
                 }
                 false
             }
         })
         .on_page_load(move |_webview, payload| {
-            let event_name = match payload.event() {
-                tauri::webview::PageLoadEvent::Started => "page_load_started",
-                tauri::webview::PageLoadEvent::Finished => "page_load_finished",
-            };
-            let event_url = payload.url().to_string();
-            let fields = event_url
-                .parse::<Url>()
-                .map(|url| url_log_fields(&url))
-                .unwrap_or_else(|_| "url=unparseable".to_owned());
-            navigation_log(event_name, &load_profile, &fields);
+            let loading = matches!(payload.event(), tauri::webview::PageLoadEvent::Started);
             set_tab_loading(
-                &app_for_load,
-                &load_profile,
-                &load_tab,
-                matches!(payload.event(), tauri::webview::PageLoadEvent::Started),
+                &app_load,
+                &profile_load,
+                &tab_load,
+                generation_load,
+                loading,
             );
-            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
-                if let Ok(current_url) = payload.url().to_string().parse::<Url>() {
-                    push_tab_navigation(&app_for_load, &load_profile, &load_tab, &current_url);
+            if !loading {
+                if let Ok(target) = payload.url().to_string().parse::<Url>() {
+                    push_tab_navigation(
+                        &app_load,
+                        &profile_load,
+                        &tab_load,
+                        generation_load,
+                        &target,
+                    );
                 }
             }
+        })
+        .on_document_title_changed(move |_webview, title| {
+            let updated = app_title
+                .state::<NavigationStore>()
+                .registry
+                .lock()
+                .ok()
+                .is_some_and(|mut registry| {
+                    registry.set_title_generation(
+                        &profile_title,
+                        &tab_title,
+                        generation_title,
+                        title,
+                    )
+                });
+            if updated {
+                emit_tabs_state(&app_title, &profile_title);
+            }
         });
-
-    navigation_log(
-        "content_webview_add_child_begin",
-        profile_id,
-        &format!(
-            "label={content_label} x=0 y={CHROME_HEIGHT} width={width:.0} height={:.0}",
-            (height - CHROME_HEIGHT).max(100.0)
-        ),
-    );
-    app.state::<NavigationStore>()
-        .registry
-        .lock()
-        .map_err(|_| "Browser tab registry is unavailable.".to_owned())?
-        .begin_tab_creation(profile_id, &active_tab_id)?;
     if let Err(error) = window.add_child(
         builder,
         tauri::LogicalPosition::new(0.0, CHROME_HEIGHT),
@@ -614,7 +780,10 @@ fn ensure_content_webview(app: &AppHandle, profile_id: &str, url: Url) -> Result
             .state::<NavigationStore>()
             .registry
             .lock()
-            .map(|mut registry| registry.finish_tab_creation(profile_id, &active_tab_id, false));
+            .map(|mut registry| registry.complete_creation(profile_id, &reservation, false));
+        if let Some(orphan) = app.get_webview(&reservation.webview_label) {
+            let _ = orphan.close();
+        }
         navigation_log(
             "content_webview_creation_failed",
             profile_id,
@@ -622,64 +791,66 @@ fn ensure_content_webview(app: &AppHandle, profile_id: &str, url: Url) -> Result
         );
         return Err("Could not create the isolated website WebView2 surface.".to_owned());
     }
-    app.state::<NavigationStore>()
+    let Some(content) = app.get_webview(&reservation.webview_label) else {
+        let _ = app
+            .state::<NavigationStore>()
+            .registry
+            .lock()
+            .map(|mut registry| registry.complete_creation(profile_id, &reservation, false));
+        return Err("The native tab was not registered after creation. Retry navigation.".into());
+    };
+    let active_id = app
+        .state::<NavigationStore>()
+        .registry
+        .lock()
+        .ok()
+        .and_then(|registry| {
+            registry
+                .profile_tabs_snapshot(profile_id)
+                .ok()
+                .map(|snapshot| snapshot.active_tab_id)
+        });
+    if active_id.as_deref() != Some(tab_id) {
+        if let Err(error) = content.hide() {
+            let _ = content.close();
+            let _ = app
+                .state::<NavigationStore>()
+                .registry
+                .lock()
+                .map(|mut registry| registry.complete_creation(profile_id, &reservation, false));
+            return Err(format!(
+                "The inactive website surface could not be hidden: {error}"
+            ));
+        }
+    } else if let Err(error) = content.show() {
+        let _ = content.close();
+        let _ = app
+            .state::<NavigationStore>()
+            .registry
+            .lock()
+            .map(|mut registry| registry.complete_creation(profile_id, &reservation, false));
+        return Err(format!("The website surface could not be shown: {error}"));
+    }
+    let completed = app
+        .state::<NavigationStore>()
         .registry
         .lock()
         .map_err(|_| "Browser tab registry is unavailable.".to_owned())?
-        .finish_tab_creation(profile_id, &active_tab_id, true)?;
-
-    match app.get_webview(&content_label) {
-        Some(content) => {
-            content.show().map_err(|error| {
-                navigation_log(
-                    "content_webview_show_failed",
-                    profile_id,
-                    &format!("stage=created error={error}"),
-                );
-                "The website surface could not be shown.".to_owned()
-            })?;
-            navigation_log(
-                "content_webview_creation_succeeded_and_shown",
-                profile_id,
-                &format!(
-                    "label={content_label} parent_visible={:?}",
-                    window.is_visible()
-                ),
-            );
+        .complete_creation(profile_id, &reservation, true);
+    if !completed {
+        if let Some(orphan) = app.get_webview(&reservation.webview_label) {
+            let _ = orphan.close();
         }
-        None => navigation_log(
-            "content_webview_creation_succeeded_but_lookup_missing",
-            profile_id,
-            &format!("label={content_label}"),
-        ),
+        return Err("The tab closed before its website surface finished creating.".into());
     }
-
-    let resize_app = app.clone();
-    let resize_content_label = content_label.clone();
-    let resize_chrome_label = chrome_label;
-    window.on_window_event(move |event| {
-        if let tauri::WindowEvent::Resized(physical) = event {
-            let Some(content) = resize_app.get_webview(&resize_content_label) else {
-                return;
-            };
-            let Some(chrome) = resize_app.get_webview(&resize_chrome_label) else {
-                return;
-            };
-            let scale = resize_app
-                .get_window(&window_label)
-                .and_then(|win| win.scale_factor().ok())
-                .unwrap_or(1.0);
-            let width = physical.width as f64 / scale;
-            let height = physical.height as f64 / scale;
-            let _ = chrome.set_size(tauri::LogicalSize::new(width, height));
-            let _ = content.set_position(tauri::LogicalPosition::new(0.0, CHROME_HEIGHT));
-            let _ = content.set_size(tauri::LogicalSize::new(
-                width,
-                (height - CHROME_HEIGHT).max(100.0),
-            ));
-        }
-    });
-    Ok(())
+    register_resize_handler(app, profile_id)?;
+    emit_tabs_state(app, profile_id);
+    navigation_log(
+        "content_webview_creation_succeeded",
+        profile_id,
+        &format!("tab={} label={}", tab_id, reservation.webview_label),
+    );
+    Ok(reservation.webview_label)
 }
 
 #[tauri::command]
@@ -687,6 +858,7 @@ async fn browser_navigate(
     app: AppHandle,
     webview: Webview,
     profile_id: String,
+    tab_id: String,
     input: String,
     search_template: String,
 ) -> Result<String, String> {
@@ -696,6 +868,8 @@ async fn browser_navigate(
         "source=browser_chrome",
     );
     require_profile_chrome(&webview, &profile_id)?;
+    let store = app.state::<NavigationStore>();
+    let _operation = store.native_ops.lock().await;
     let target = resolve_address(&input, &search_template).map_err(|error| {
         navigation_log(
             "url_validation_failed",
@@ -709,15 +883,53 @@ async fn browser_navigate(
         &profile_id,
         &url_log_fields(&target),
     );
-    ensure_content_webview(&app, &profile_id, target.clone()).map_err(|error| {
-        navigation_log(
-            "navigation_command_failed",
-            &profile_id,
-            &format!("stage=webview_setup error={error}"),
-        );
-        error
-    })?;
-    set_loading(&app, &profile_id, true);
+    let (label, lifecycle, is_active, generation) = {
+        let store = app.state::<NavigationStore>();
+        let registry = store
+            .registry
+            .lock()
+            .map_err(|_| "Browser tab registry is unavailable.".to_owned())?;
+        let profile = registry
+            .profile(&profile_id)
+            .ok_or_else(|| "Open this profile before navigating.".to_owned())?;
+        let tab = profile
+            .tabs
+            .get(&tab_id)
+            .ok_or_else(|| "The selected tab does not belong to this profile.".to_owned())?;
+        (
+            tab.webview_label.clone(),
+            tab.lifecycle,
+            profile.active_tab_id == tab_id,
+            tab.generation,
+        )
+    };
+    match lifecycle {
+        tabs::TabLifecycle::Ready => {
+            let content = app.get_webview(&label).ok_or_else(|| {
+                "This tab's native website surface is unavailable. Create a new tab and retry."
+                    .to_owned()
+            })?;
+            if is_active {
+                content
+                    .show()
+                    .map_err(|_| "The selected website surface could not be shown.".to_owned())?;
+            }
+            content
+                .navigate(target.clone())
+                .map_err(|_| "The website navigation request could not be sent.".to_owned())?;
+            set_tab_loading(&app, &profile_id, &tab_id, generation, true);
+        }
+        tabs::TabLifecycle::Empty => {
+            ensure_content_webview(&app, &profile_id, &tab_id, target.clone())?;
+        }
+        tabs::TabLifecycle::Creating => {
+            return Err("This tab is still opening. Wait for it to finish, then retry.".into())
+        }
+        tabs::TabLifecycle::Closing => {
+            return Err("This tab is closing. Select another tab or retry shortly.".into())
+        }
+    }
+    emit_tabs_state(&app, &profile_id);
     navigation_log(
         "navigation_command_completed",
         &profile_id,
@@ -733,79 +945,403 @@ fn browser_state(
     profile_id: String,
 ) -> Result<NavigationState, String> {
     require_profile_chrome(&webview, &profile_id)?;
-    let (_, _, content_label) = browser_labels(&profile_id)?;
-    if app.get_webview(&content_label).is_none() {
-        // A newly opened chrome has no website child until its first navigation.
-        // Never expose history left behind by a previous window lifecycle.
-        return Ok(NavigationState::default());
-    }
     Ok(navigation_state(&app, &profile_id))
 }
 
 #[tauri::command]
-fn browser_back(app: AppHandle, webview: Webview, profile_id: String) -> Result<(), String> {
+fn browser_tabs_state(
+    app: AppHandle,
+    webview: Webview,
+    profile_id: String,
+) -> Result<tabs::ProfileTabsSnapshot, String> {
     require_profile_chrome(&webview, &profile_id)?;
-    let (_, _, content_label) = browser_labels(&profile_id)?;
-    let update = app
-        .state::<NavigationStore>()
-        .with_active_navigation(&profile_id, |state| {
-            let index = state
-                .index
-                .ok_or_else(|| "There is no previous page.".to_owned())?;
-            if index == 0 {
-                return Err("There is no previous page.".to_owned());
-            }
-            state.index = Some(index - 1);
-            state.pending_history_index = Some(index - 1);
-            if let Some(url) = state.entries.get(index - 1) {
-                state.current_url = Some(url.clone());
-            }
-            Ok(())
+    app.state::<NavigationStore>()
+        .registry
+        .lock()
+        .map_err(|_| "Browser tab registry is unavailable.".to_owned())?
+        .profile_tabs_snapshot(&profile_id)
+}
+
+#[tauri::command]
+async fn browser_new_tab(
+    app: AppHandle,
+    webview: Webview,
+    profile_id: String,
+) -> Result<String, String> {
+    require_profile_chrome(&webview, &profile_id)?;
+    let store = app.state::<NavigationStore>();
+    let _operation = store.native_ops.lock().await;
+    let (previous_label, previous_ready) = {
+        let registry = store
+            .registry
+            .lock()
+            .map_err(|_| "Browser tab registry is unavailable.".to_owned())?;
+        let profile = registry
+            .profile(&profile_id)
+            .ok_or_else(|| "The profile is not open.".to_owned())?;
+        let previous = profile
+            .tabs
+            .get(&profile.active_tab_id)
+            .ok_or_else(|| "The active tab is unavailable.".to_owned())?;
+        (
+            previous.webview_label.clone(),
+            previous.lifecycle == tabs::TabLifecycle::Ready,
+        )
+    };
+    if previous_ready {
+        if let Some(previous) = app.get_webview(&previous_label) {
+            previous.hide().map_err(|_| {
+                "Could not hide the current tab before creating a new one.".to_owned()
+            })?;
+        }
+    }
+    let tab_result = {
+        let store = app.state::<NavigationStore>();
+        let mut registry = store
+            .registry
+            .lock()
+            .map_err(|_| "Browser tab registry is unavailable.".to_owned())?;
+        registry.add_tab_generated(&profile_id).and_then(|id| {
+            registry.select_tab(&profile_id, &id)?;
+            Ok(id)
         })
-        .ok_or_else(|| "Navigation state is unavailable.".to_owned())?;
+    };
+    let tab_id = match tab_result {
+        Ok(tab_id) => tab_id,
+        Err(error) => {
+            if previous_ready {
+                if let Some(previous) = app.get_webview(&previous_label) {
+                    let _ = previous.show();
+                }
+            }
+            return Err(error);
+        }
+    };
+    emit_tabs_state(&app, &profile_id);
+    emit_state(
+        &app,
+        &profile_id,
+        &navigation_state_for(&app, &profile_id, &tab_id),
+    );
+    Ok(tab_id)
+}
+
+#[tauri::command]
+async fn browser_select_tab(
+    app: AppHandle,
+    webview: Webview,
+    profile_id: String,
+    tab_id: String,
+) -> Result<(), String> {
+    require_profile_chrome(&webview, &profile_id)?;
+    let store = app.state::<NavigationStore>();
+    let _operation = store.native_ops.lock().await;
+    let (old_id, old_label, old_ready, target_label, target_ready) = {
+        let store = app.state::<NavigationStore>();
+        let registry = store
+            .registry
+            .lock()
+            .map_err(|_| "Browser tab registry is unavailable.".to_owned())?;
+        let profile = registry
+            .profile(&profile_id)
+            .ok_or_else(|| "The profile is not open.".to_owned())?;
+        let old = profile
+            .tabs
+            .get(&profile.active_tab_id)
+            .ok_or_else(|| "The active tab is unavailable.".to_owned())?;
+        let target = profile
+            .tabs
+            .get(&tab_id)
+            .ok_or_else(|| "The tab does not belong to this profile.".to_owned())?;
+        (
+            old.id.clone(),
+            old.webview_label.clone(),
+            old.lifecycle == tabs::TabLifecycle::Ready,
+            target.webview_label.clone(),
+            target.lifecycle == tabs::TabLifecycle::Ready,
+        )
+    };
+    if old_id == tab_id {
+        return Ok(());
+    }
+    if old_ready {
+        if let Some(old) = app.get_webview(&old_label) {
+            old.hide()
+                .map_err(|_| "Could not hide the previous tab.".to_owned())?;
+        }
+    }
+    if target_ready {
+        let Some(target) = app.get_webview(&target_label) else {
+            if old_ready {
+                if let Some(old) = app.get_webview(&old_label) {
+                    let _ = old.show();
+                }
+            }
+            return Err("The selected tab's website surface is unavailable.".into());
+        };
+        if let Err(error) = target.show() {
+            if old_ready {
+                if let Some(old) = app.get_webview(&old_label) {
+                    let _ = old.show();
+                }
+            }
+            return Err(format!("Could not show the selected tab: {error}"));
+        }
+        let _ = target.set_focus();
+    }
+    app.state::<NavigationStore>()
+        .registry
+        .lock()
+        .map_err(|_| "Browser tab registry is unavailable.".to_owned())?
+        .select_tab(&profile_id, &tab_id)?;
+    emit_tabs_state(&app, &profile_id);
+    emit_state(
+        &app,
+        &profile_id,
+        &navigation_state_for(&app, &profile_id, &tab_id),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+async fn browser_close_tab(
+    app: AppHandle,
+    webview: Webview,
+    profile_id: String,
+    tab_id: String,
+) -> Result<(), String> {
+    require_profile_chrome(&webview, &profile_id)?;
+    let store = app.state::<NavigationStore>();
+    let _operation = store.native_ops.lock().await;
+    let (
+        active_id,
+        is_active,
+        label,
+        ready,
+        neighbor_id,
+        neighbor_label,
+        neighbor_ready,
+        tab_count,
+    ) = {
+        let store = app.state::<NavigationStore>();
+        let registry = store
+            .registry
+            .lock()
+            .map_err(|_| "Browser tab registry is unavailable.".to_owned())?;
+        let profile = registry
+            .profile(&profile_id)
+            .ok_or_else(|| "The profile is not open.".to_owned())?;
+        let tab = profile
+            .tabs
+            .get(&tab_id)
+            .ok_or_else(|| "The tab does not belong to this profile.".to_owned())?;
+        let neighbor_id = registry.neighboring_tab(&profile_id, &tab_id)?;
+        let neighbor = profile
+            .tabs
+            .get(&neighbor_id)
+            .ok_or_else(|| "The neighboring tab is unavailable.".to_owned())?;
+        (
+            profile.active_tab_id.clone(),
+            profile.active_tab_id == tab_id,
+            tab.webview_label.clone(),
+            tab.lifecycle == tabs::TabLifecycle::Ready,
+            neighbor_id,
+            neighbor.webview_label.clone(),
+            neighbor.lifecycle == tabs::TabLifecycle::Ready,
+            profile.ordered_tab_ids.len(),
+        )
+    };
+    if is_active && ready {
+        if let Some(content) = app.get_webview(&label) {
+            content
+                .hide()
+                .map_err(|_| "Could not hide the tab being closed.".to_owned())?;
+        }
+    }
+    if is_active && neighbor_id != tab_id && neighbor_ready {
+        let Some(neighbor) = app.get_webview(&neighbor_label) else {
+            if ready {
+                if let Some(content) = app.get_webview(&label) {
+                    let _ = content.show();
+                }
+            }
+            return Err("The neighboring tab's website surface is unavailable.".into());
+        };
+        if let Err(error) = neighbor.show() {
+            if ready {
+                if let Some(content) = app.get_webview(&label) {
+                    let _ = content.show();
+                }
+            }
+            return Err(format!("Could not show the neighboring tab: {error}"));
+        }
+    }
+    if let Some(content) = app.get_webview(&label) {
+        if let Err(error) = content.close() {
+            if is_active && neighbor_id != tab_id && neighbor_ready {
+                if let Some(next) = app.get_webview(&neighbor_label) {
+                    let _ = next.hide();
+                }
+            }
+            if is_active && ready {
+                if let Some(current) = app.get_webview(&label) {
+                    let _ = current.show();
+                }
+            }
+            return Err(format!("Could not close the native tab surface: {error}"));
+        }
+    }
+    let selected = app
+        .state::<NavigationStore>()
+        .registry
+        .lock()
+        .map_err(|_| "Browser tab registry is unavailable.".to_owned())?
+        .close_tab(&profile_id, &tab_id)?;
+    if is_active && tab_count > 1 && neighbor_ready {
+        if let Some(next) = app.get_webview(&neighbor_label) {
+            let _ = next.set_focus();
+        }
+    }
+    if selected == active_id || selected == tab_id {
+        let state = navigation_state_for(&app, &profile_id, &selected);
+        emit_state(&app, &profile_id, &state);
+    } else {
+        emit_state(
+            &app,
+            &profile_id,
+            &navigation_state_for(&app, &profile_id, &selected),
+        );
+    }
+    emit_tabs_state(&app, &profile_id);
+    Ok(())
+}
+
+#[tauri::command]
+async fn browser_back(
+    app: AppHandle,
+    webview: Webview,
+    profile_id: String,
+    tab_id: String,
+) -> Result<(), String> {
+    require_profile_chrome(&webview, &profile_id)?;
+    let store = app.state::<NavigationStore>();
+    let _operation = store.native_ops.lock().await;
+    let content_label = app
+        .state::<NavigationStore>()
+        .registry
+        .lock()
+        .map_err(|_| "Browser tab registry is unavailable.".to_owned())?
+        .tab_label(&profile_id, &tab_id)?;
+    let content = app
+        .get_webview(&content_label)
+        .ok_or_else(|| "No page is open to navigate back.".to_owned())?;
+    let update = {
+        let store = app.state::<NavigationStore>();
+        let result = store
+            .registry
+            .lock()
+            .map_err(|_| "Browser tab registry is unavailable.".to_owned())?
+            .navigation_mut(&profile_id, &tab_id)
+            .map(|state| {
+                let index = state
+                    .index
+                    .ok_or_else(|| "There is no previous page.".to_owned())?;
+                if index == 0 {
+                    return Err("There is no previous page.".to_owned());
+                }
+                state.index = Some(index - 1);
+                state.pending_history_index = Some(index - 1);
+                if let Some(url) = state.entries.get(index - 1) {
+                    state.current_url = Some(url.clone());
+                }
+                Ok(())
+            })
+            .ok_or_else(|| "Navigation state is unavailable.".to_owned())?;
+        result
+    };
     update?;
-    app.get_webview(&content_label)
-        .ok_or_else(|| "No page is open to navigate back.".to_owned())?
+    content
         .eval("history.back()")
         .map_err(|_| "Could not navigate back.".to_owned())?;
-    emit_state(&app, &profile_id, &navigation_state(&app, &profile_id));
+    emit_state(
+        &app,
+        &profile_id,
+        &navigation_state_for(&app, &profile_id, &tab_id),
+    );
     Ok(())
 }
 
 #[tauri::command]
-fn browser_forward(app: AppHandle, webview: Webview, profile_id: String) -> Result<(), String> {
+async fn browser_forward(
+    app: AppHandle,
+    webview: Webview,
+    profile_id: String,
+    tab_id: String,
+) -> Result<(), String> {
     require_profile_chrome(&webview, &profile_id)?;
-    let (_, _, content_label) = browser_labels(&profile_id)?;
-    let update = app
+    let store = app.state::<NavigationStore>();
+    let _operation = store.native_ops.lock().await;
+    let content_label = app
         .state::<NavigationStore>()
-        .with_active_navigation(&profile_id, |state| {
-            let index = state
-                .index
-                .ok_or_else(|| "There is no next page.".to_owned())?;
-            if index + 1 >= state.entries.len() {
-                return Err("There is no next page.".to_owned());
-            }
-            state.index = Some(index + 1);
-            state.pending_history_index = Some(index + 1);
-            if let Some(url) = state.entries.get(index + 1) {
-                state.current_url = Some(url.clone());
-            }
-            Ok(())
-        })
-        .ok_or_else(|| "Navigation state is unavailable.".to_owned())?;
+        .registry
+        .lock()
+        .map_err(|_| "Browser tab registry is unavailable.".to_owned())?
+        .tab_label(&profile_id, &tab_id)?;
+    let content = app
+        .get_webview(&content_label)
+        .ok_or_else(|| "No page is open to navigate forward.".to_owned())?;
+    let update = {
+        let store = app.state::<NavigationStore>();
+        let result = store
+            .registry
+            .lock()
+            .map_err(|_| "Browser tab registry is unavailable.".to_owned())?
+            .navigation_mut(&profile_id, &tab_id)
+            .map(|state| {
+                let index = state
+                    .index
+                    .ok_or_else(|| "There is no next page.".to_owned())?;
+                if index + 1 >= state.entries.len() {
+                    return Err("There is no next page.".to_owned());
+                }
+                state.index = Some(index + 1);
+                state.pending_history_index = Some(index + 1);
+                if let Some(url) = state.entries.get(index + 1) {
+                    state.current_url = Some(url.clone());
+                }
+                Ok(())
+            })
+            .ok_or_else(|| "Navigation state is unavailable.".to_owned())?;
+        result
+    };
     update?;
-    app.get_webview(&content_label)
-        .ok_or_else(|| "No page is open to navigate forward.".to_owned())?
+    content
         .eval("history.forward()")
         .map_err(|_| "Could not navigate forward.".to_owned())?;
-    emit_state(&app, &profile_id, &navigation_state(&app, &profile_id));
+    emit_state(
+        &app,
+        &profile_id,
+        &navigation_state_for(&app, &profile_id, &tab_id),
+    );
     Ok(())
 }
 
 #[tauri::command]
-fn browser_reload(app: AppHandle, webview: Webview, profile_id: String) -> Result<(), String> {
+async fn browser_reload(
+    app: AppHandle,
+    webview: Webview,
+    profile_id: String,
+    tab_id: String,
+) -> Result<(), String> {
     require_profile_chrome(&webview, &profile_id)?;
-    let (_, _, label) = browser_labels(&profile_id)?;
+    let store = app.state::<NavigationStore>();
+    let _operation = store.native_ops.lock().await;
+    let label = app
+        .state::<NavigationStore>()
+        .registry
+        .lock()
+        .map_err(|_| "Browser tab registry is unavailable.".to_owned())?
+        .tab_label(&profile_id, &tab_id)?;
     app.get_webview(&label)
         .ok_or_else(|| "No page is open to reload.".to_owned())?
         .reload()
@@ -813,20 +1349,41 @@ fn browser_reload(app: AppHandle, webview: Webview, profile_id: String) -> Resul
 }
 
 #[tauri::command]
-fn browser_stop(app: AppHandle, webview: Webview, profile_id: String) -> Result<(), String> {
+async fn browser_stop(
+    app: AppHandle,
+    webview: Webview,
+    profile_id: String,
+    tab_id: String,
+) -> Result<(), String> {
     require_profile_chrome(&webview, &profile_id)?;
-    let (_, _, label) = browser_labels(&profile_id)?;
+    let store = app.state::<NavigationStore>();
+    let _operation = store.native_ops.lock().await;
+    let label = app
+        .state::<NavigationStore>()
+        .registry
+        .lock()
+        .map_err(|_| "Browser tab registry is unavailable.".to_owned())?
+        .tab_label(&profile_id, &tab_id)?;
     app.get_webview(&label)
         .ok_or_else(|| "No page is loading.".to_owned())?
         .eval("window.stop()")
         .map_err(|_| "Could not stop the current page load.".to_owned())?;
-    set_loading(&app, &profile_id, false);
+    let generation = app
+        .state::<NavigationStore>()
+        .registry
+        .lock()
+        .map_err(|_| "Browser tab registry is unavailable.".to_owned())?
+        .tab_snapshot(&profile_id, &tab_id)?
+        .generation;
+    set_tab_loading(&app, &profile_id, &tab_id, generation, false);
     Ok(())
 }
 
 #[tauri::command]
-fn close_profile(app: AppHandle, webview: Webview, profile_id: String) -> Result<(), String> {
+async fn close_profile(app: AppHandle, webview: Webview, profile_id: String) -> Result<(), String> {
     require_local_shell(&webview, Some(&profile_id))?;
+    let store = app.state::<NavigationStore>();
+    let _operation = store.native_ops.lock().await;
     let (window_label, _, _) = browser_labels(&profile_id)?;
     let store = app.state::<NavigationStore>();
     store.mark_closing(&profile_id)?;
@@ -853,15 +1410,94 @@ fn profile_directory(
     Ok(path.display().to_string())
 }
 
+#[tauri::command]
+fn list_profiles(
+    webview: Webview,
+    store: tauri::State<'_, ProfileStore>,
+    current_profile_id: Option<String>,
+) -> Result<Vec<BrowserProfile>, String> {
+    require_local_shell(&webview, current_profile_id.as_deref())?;
+    store.list()
+}
+
+#[tauri::command]
+fn create_profile(
+    app: AppHandle,
+    webview: Webview,
+    store: tauri::State<'_, ProfileStore>,
+    current_profile_id: Option<String>,
+    name: String,
+    avatar: String,
+    accent: String,
+) -> Result<BrowserProfile, String> {
+    require_local_shell(&webview, current_profile_id.as_deref())?;
+    let profile = store.create(&name, &avatar, &accent)?;
+    let _ = app.emit("browser:profiles-changed", ());
+    Ok(profile)
+}
+
+#[tauri::command]
+fn update_profile(
+    app: AppHandle,
+    webview: Webview,
+    store: tauri::State<'_, ProfileStore>,
+    current_profile_id: Option<String>,
+    profile_id: String,
+    name: String,
+    avatar: String,
+    accent: String,
+) -> Result<BrowserProfile, String> {
+    require_local_shell(&webview, current_profile_id.as_deref())?;
+    let profile = store.update(&profile_id, &name, &avatar, &accent)?;
+    let _ = app.emit("browser:profiles-changed", ());
+    Ok(profile)
+}
+
+#[tauri::command]
+fn show_profile_manager(
+    app: AppHandle,
+    webview: Webview,
+    current_profile_id: Option<String>,
+) -> Result<(), String> {
+    require_local_shell(&webview, current_profile_id.as_deref())?;
+    let landing = app
+        .get_window("main")
+        .ok_or_else(|| "The profile landing window is unavailable.".to_owned())?;
+    landing
+        .show()
+        .map_err(|_| "Could not show profile management.".to_owned())?;
+    landing
+        .set_focus()
+        .map_err(|_| "Could not focus profile management.".to_owned())
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(NavigationStore::default())
+        .setup(|app| {
+            let catalog = app
+                .path()
+                .app_local_data_dir()?
+                .join("profile-catalog.jsonl");
+            let store = ProfileStore::load(catalog)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+            app.manage(store);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
+            list_profiles,
+            create_profile,
+            update_profile,
+            show_profile_manager,
             open_profile,
             close_profile,
             profile_directory,
             browser_navigate,
             browser_state,
+            browser_tabs_state,
+            browser_new_tab,
+            browser_select_tab,
+            browser_close_tab,
             browser_back,
             browser_forward,
             browser_reload,

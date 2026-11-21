@@ -1,97 +1,54 @@
 import { invoke } from '@tauri-apps/api/core'
+import { createProfileDialog, type BrowserProfile } from './profile-management'
 import './style.css'
+import './levi-theme.css'
 
-type ProfileLaunch = {
-  profileId: string
-  windowLabel: string
-  dataDirectory: string
-  reusedWindow: boolean
-}
-
+type ProfileLaunch = { profileId: string; windowLabel: string; dataDirectory: string; reusedWindow: boolean }
 const app = document.querySelector<HTMLDivElement>('#app')!
+app.innerHTML = `<div class="shell"><aside class="rail"><div class="brand-mark">L<span>•</span></div><div class="rail-label">BROWSER</div><div class="rail-spacer"></div><div class="runtime-dot" title="Windows WebView2"></div></aside><main class="workspace"><header class="topbar"><div class="brand"><span class="eyebrow">LEVI ECOSYSTEM / PRIVATE BROWSING SPACES</span><h1>LEVI <b>BROWSER</b></h1></div><div class="build-pill"><i></i> WINDOWS WEBVIEW2 · NATIVE</div></header><section class="hero"><span class="eyebrow">PRIVATE BROWSING SPACES</span><h2>One browser.<br/><em>Your profiles.</em></h2><p>Each profile has its own persistent WebView2 storage and opens in a separate native window.</p></section><div class="profile-heading"><div><h2>Your profiles</h2><p id="profile-count">Loading saved profiles…</p></div><button class="primary add-profile">＋ Add profile</button></div><section class="profiles" id="profile-grid" aria-label="Saved browser profiles"></section><section class="proof-note"><div class="shield">◇</div><div><strong>Separate profile storage</strong><span>Profiles use independent persistent WebView2 user-data folders. Existing Alpha and Beta folders remain in place.</span></div><span class="proof-status">LOCAL DATA</span></section><footer><span>LEVI BROWSER</span><span>Profile settings stored locally</span></footer></main></div>`
+
 const status = document.createElement('div')
-status.className = 'status-line'
+status.className = 'toast'
+status.setAttribute('role', 'status')
+app.append(status)
+function announce(message: string) { status.textContent = message; status.classList.add('visible'); window.setTimeout(() => status.classList.remove('visible'), 4500) }
 
-app.innerHTML = `
-  <div class="shell">
-    <aside class="rail">
-      <div class="brand-mark">L<span>•</span></div>
-      <div class="rail-label">LAB</div>
-      <div class="rail-spacer"></div>
-      <div class="runtime-dot" title="Windows WebView2"></div>
-    </aside>
-    <main class="workspace">
-      <header class="topbar">
-        <div class="brand"><span class="eyebrow">LEVI ECOSYSTEM / PRIVATE BROWSING SPACES</span><h1>LEVI <b>BROWSER</b></h1></div>
-        <div class="build-pill"><i></i> WINDOWS WEBVIEW2 · NATIVE NAVIGATION</div>
-      </header>
-      <section class="hero">
-        <span class="eyebrow">MISSION 002A / NATIVE WEB NAVIGATION</span>
-        <h2>One Browser.<br/><em>Multiple Worlds.</em></h2>
-        <p>Open a private browsing space to visit websites in native WebView2. Alpha and Beta keep separate persistent User Data Folders.</p>
-      </section>
-      <section class="profiles" aria-label="Isolated test profiles">
-        <article class="profile-card alpha">
-          <div class="profile-orbit">A</div>
-          <div class="profile-copy"><span class="eyebrow">ISOLATION SPACE 01</span><h3>Profile Alpha</h3><p>Native website surface with its own persistent storage and cookie jar.</p><code id="alpha-path">Loading storage path…</code></div>
-          <div class="profile-actions"><button class="primary" data-open="alpha">Open Alpha Browser <span>↗</span></button><button class="subtle" data-close="alpha">Close browser</button></div>
-        </article>
-        <article class="profile-card beta">
-          <div class="profile-orbit">B</div>
-          <div class="profile-copy"><span class="eyebrow">ISOLATION SPACE 02</span><h3>Profile Beta</h3><p>Separate from Alpha, including when both browsers are open together.</p><code id="beta-path">Loading storage path…</code></div>
-          <div class="profile-actions"><button class="primary" data-open="beta">Open Beta Browser <span>↗</span></button><button class="subtle" data-close="beta">Close browser</button></div>
-        </article>
-      </section>
-      <section class="proof-note"><div class="shield">◇</div><div><strong>Isolated WebView2 profile</strong><span>Each space opens a separate native website surface with its own existing persistent data folder. No external browser profile or credentials are accessed.</span></div><span class="proof-status">PERSISTENT UDF</span></section>
-      <footer><span>LEVI BROWSER FOUNDATION · 0.1.0</span><span>Profiles remain on this device</span></footer>
-    </main>
-  </div>
-`
-
-const statusLine = document.createElement('div')
-statusLine.className = 'toast'
-statusLine.setAttribute('role', 'status')
-app.append(statusLine)
-
-function announce(message: string) {
-  statusLine.textContent = message
-  statusLine.classList.add('visible')
+async function openProfile(profileId: string) {
+  try {
+    const result = await invoke<ProfileLaunch>('open_profile', { profileId, currentProfileId: null })
+    announce(result.reusedWindow ? `${profileId} window focused.` : `${profileId} opened in a separate window.`)
+  } catch (cause) { announce(`Could not open profile: ${String(cause)}`) }
 }
 
-async function loadPaths() {
-  for (const profileId of ['alpha', 'beta']) {
-    const path = await invoke<string>('profile_directory', { profileId })
-    document.querySelector<HTMLElement>(`#${profileId}-path`)!.textContent = path
-  }
+const dialog = createProfileDialog(null, id => void openProfile(id))
+app.querySelector('.add-profile')!.addEventListener('click', () => dialog.open())
+
+async function renderProfiles() {
+  const grid = app.querySelector<HTMLElement>('#profile-grid')!
+  const count = app.querySelector<HTMLElement>('#profile-count')!
+  grid.replaceChildren()
+  try {
+    const profiles = await invoke<BrowserProfile[]>('list_profiles', { currentProfileId: null })
+    count.textContent = `${profiles.length} ${profiles.length === 1 ? 'profile' : 'profiles'} saved on this device`
+    for (const profile of profiles) {
+      const path = await invoke<string>('profile_directory', { profileId: profile.id })
+      const card = document.createElement('article')
+      card.className = 'profile-card'
+      card.style.setProperty('--profile-accent', profile.accent)
+      const avatar = document.createElement('div'); avatar.className = 'profile-orbit'; avatar.textContent = profile.avatar
+      const copy = document.createElement('div'); copy.className = 'profile-copy'
+      const title = document.createElement('h3'); title.textContent = profile.name
+      const detail = document.createElement('p'); detail.textContent = 'Separate native window · Independent persistent storage'
+      const directory = document.createElement('code'); directory.textContent = path; directory.title = path
+      copy.append(title, detail, directory)
+      const actions = document.createElement('div'); actions.className = 'profile-actions'
+      const open = document.createElement('button'); open.className = 'primary'; open.textContent = 'Open profile ↗'; open.addEventListener('click', () => void openProfile(profile.id))
+      const manage = document.createElement('button'); manage.className = 'subtle'; manage.textContent = 'Manage'; manage.addEventListener('click', () => dialog.open(profile))
+      const close = document.createElement('button'); close.className = 'subtle'; close.textContent = 'Close window'; close.addEventListener('click', async () => { try { await invoke('close_profile', { profileId: profile.id }); announce(`${profile.name} window closed. Profile data remains saved.`) } catch (cause) { announce(String(cause)) } })
+      actions.append(open, manage, close); card.append(avatar, copy, actions); grid.append(card)
+    }
+  } catch (cause) { count.textContent = 'Could not load saved profiles'; announce(`Profile catalog error: ${String(cause)}`) }
 }
 
-app.querySelectorAll<HTMLButtonElement>('[data-open]').forEach((button) => {
-  button.addEventListener('click', async () => {
-    const profileId = button.dataset.open!
-    button.disabled = true
-    try {
-      const result = await invoke<ProfileLaunch>('open_profile', { profileId })
-      announce(result.reusedWindow
-        ? `Existing ${profileId.toUpperCase()} session focused.`
-        : `${profileId.toUpperCase()} browser window opened. Enter a URL to navigate.`)
-    } catch (error) {
-      announce(`Could not open ${profileId.toUpperCase()}: ${String(error)}`)
-    } finally {
-      button.disabled = false
-    }
-  })
-})
-
-app.querySelectorAll<HTMLButtonElement>('[data-close]').forEach((button) => {
-  button.addEventListener('click', async () => {
-    const profileId = button.dataset.close!
-    try {
-      await invoke('close_profile', { profileId })
-      announce(`${profileId.toUpperCase()} test window closed. Its isolated data is preserved.`)
-    } catch (error) {
-      announce(`Could not close ${profileId.toUpperCase()}: ${String(error)}`)
-    }
-  })
-})
-
-void loadPaths().catch((error) => announce(`Could not resolve profile storage paths: ${String(error)}`))
+window.addEventListener('levi:profiles-changed', () => void renderProfiles())
+void renderProfiles()

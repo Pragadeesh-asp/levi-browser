@@ -16,6 +16,7 @@ export default defineConfig({
         main: resolve(projectRoot, 'index.html'),
         browserAlpha: resolve(projectRoot, 'browser-alpha.html'),
         browserBeta: resolve(projectRoot, 'browser-beta.html'),
+        browserProfile: resolve(projectRoot, 'browser-profile.html'),
       },
     },
   },
