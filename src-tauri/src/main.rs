@@ -1509,7 +1509,36 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_address, NavigationState, NavigationStore};
+    use super::{browser_labels, resolve_address, NavigationState, NavigationStore};
+
+    #[test]
+    fn chrome_capability_covers_created_profiles_but_never_website_content() {
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/browser-chrome.json")).unwrap();
+        let patterns: Vec<&str> = capability["webviews"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|pattern| pattern.as_str())
+            .collect();
+        // Only exact labels and trailing-* globs are expected in this file.
+        let matches = |label: &str| {
+            patterns
+                .iter()
+                .any(|pattern| match pattern.strip_suffix('*') {
+                    Some(prefix) => label.starts_with(prefix),
+                    None => label == *pattern,
+                })
+        };
+        for profile in ["alpha", "beta", "p-18f2a9c-1"] {
+            let (window, chrome, content) = browser_labels(profile).unwrap();
+            assert!(matches(&chrome), "{chrome} must receive browser events");
+            assert!(!matches(&window));
+            assert!(!matches(&content));
+            assert!(!matches(&format!("content-{profile}-tab-3")));
+        }
+        assert!(!matches("main"));
+    }
 
     #[test]
     fn accepts_https_http_and_scheme_less_domains() {
