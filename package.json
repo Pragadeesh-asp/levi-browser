@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 4173 --strictPort",
-    "build": "vite build",
+    "build": "tsc -p . && vite build",
+    "typecheck": "tsc -p .",
+    "lint": "oxlint",
     "tauri": "tauri"
   },
   "dependencies": {
@@ -13,6 +15,8 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.9.1",
+    "oxlint": "^1.94.0",
+    "typescript": "~7.0.2",
     "vite": "^8.3.8"
   }
 }

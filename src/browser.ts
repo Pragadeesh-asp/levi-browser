@@ -77,7 +77,6 @@ const tabsElement = root.querySelector<HTMLDivElement>('#tabs')!
 const profileMenu = root.querySelector<HTMLElement>('#profile-menu')!
 const profileMenuButton = root.querySelector<HTMLButtonElement>('#profile-menu-button')!
 let tabsState: TabsState | null = null
-let navigationState: NavigationState = { currentUrl: null, entries: [], index: null, isLoading: false, error: null }
 
 searchEngine.value = localStorage.getItem(searchKey) ?? defaultSearch
 searchEngine.addEventListener('change', () => localStorage.setItem(searchKey, searchEngine.value))
@@ -91,7 +90,6 @@ function showMessage(text: string) {
 function activeTabId() { return tabsState?.activeTabId ?? '' }
 
 function updateNavigation(state: NavigationState) {
-  navigationState = state
   address.value = state.currentUrl && state.currentUrl !== 'about:blank' ? state.currentUrl : ''
   emptyState.hidden = Boolean(state.currentUrl)
   loadingStrip.classList.toggle('active', state.isLoading)
@@ -217,7 +215,8 @@ const profileDialog = createProfileDialog(profileId, async newProfileId => {
   try { await invoke('open_profile', { profileId: newProfileId, currentProfileId: profileId }) }
   catch (error) { showMessage(`Profile was saved, but its window could not open: ${String(error)}`) }
 })
-profileMenuButton.addEventListener('click', () => setProfileMenu(profileMenu.hidden))
+// `hidden` can also be the string "until-found"; any hidden state means "open it".
+profileMenuButton.addEventListener('click', () => setProfileMenu(profileMenu.hidden !== false))
 root.querySelector<HTMLButtonElement>('#profile-add')!.addEventListener('click', () => { setProfileMenu(false); profileDialog.open() })
 root.querySelector<HTMLButtonElement>('#profile-manage')!.addEventListener('click', () => {
   setProfileMenu(false)
