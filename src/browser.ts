@@ -238,8 +238,30 @@ window.addEventListener('keydown', (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'w') { event.preventDefault(); const tabId = activeTabId(); if (tabId) void invoke('browser_close_tab', { profileId, tabId }).catch((error) => showMessage(String(error))) }
 })
 
+// Pages sent by other LEVI apps (`--space <id> --open <url>`) wait in Rust until this
+// chrome takes them. The empty first tab is reused; otherwise each page gets a new tab.
+let drainingLaunches = false
+let drainAgain = false
+async function openLaunchUrl(url: string) {
+  const active = tabsState?.tabs.find((tab) => tab.id === tabsState?.activeTabId)
+  const tabId = active && active.lifecycle === 'empty' && !active.currentUrl ? active.id : await invoke<string>('browser_new_tab', { profileId })
+  address.value = await invoke<string>('browser_navigate', { profileId, tabId, input: url, searchTemplate: searchEngine.value })
+}
+async function drainLaunchQueue() {
+  if (drainingLaunches) { drainAgain = true; return }
+  drainingLaunches = true
+  try {
+    do {
+      drainAgain = false
+      for (const url of await invoke<string[]>('browser_take_launch_urls', { profileId })) await openLaunchUrl(url)
+    } while (drainAgain)
+  } catch (error) { showMessage(`Could not open the requested page: ${String(error)}`) }
+  finally { drainingLaunches = false }
+}
+
 void Promise.all([
   listen('browser:profiles-changed', () => void refreshProfiles()),
+  listen('browser:open-request', () => void drainLaunchQueue(), { target: { kind: 'Webview', label: `chrome-${profileId}` } }),
   listen<NavigationEvent>('browser:navigation-state', (event) => {
     if (event.payload.profileId !== profileId) {
       console.warn('[LEVI_DIAG] ignored cross-profile navigation state event')
@@ -248,4 +270,4 @@ void Promise.all([
     updateNavigation(event.payload.state)
   }, { target: { kind: 'Webview', label: `chrome-${profileId}` } }),
   listen<TabsState>('browser:tabs-state', (event) => { renderTabs(event.payload); if (event.payload.activeTabId !== activeTabId()) { /* state refresh follows in command response */ } }, { target: { kind: 'Webview', label: `chrome-${profileId}` } }),
-]).then(() => refresh()).catch((error: unknown) => showMessage(`Could not listen for browser updates: ${String(error)}`))
+]).then(async () => { await refresh(); await drainLaunchQueue() }).catch((error: unknown) => showMessage(`Could not listen for browser updates: ${String(error)}`))

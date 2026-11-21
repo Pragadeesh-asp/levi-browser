@@ -15,6 +15,8 @@ mod tabs;
 use tabs::BrowserRegistry;
 mod profiles;
 use profiles::{BrowserProfile, ProfileStore};
+mod ecosystem;
+use ecosystem::LaunchQueue;
 
 const CHROME_HEIGHT: f64 = 132.0;
 const INITIAL_WIDTH: f64 = 1120.0;
@@ -532,6 +534,12 @@ async fn open_profile(
     current_profile_id: Option<String>,
 ) -> Result<ProfileLaunch, String> {
     require_local_shell(&webview, current_profile_id.as_deref())?;
+    open_profile_window(app, profile_id).await
+}
+
+/// Opens (or focuses) a Space's window on the UI thread. Shared by the
+/// `open_profile` command and by `--space/--open` launch requests.
+async fn open_profile_window(app: AppHandle, profile_id: String) -> Result<ProfileLaunch, String> {
     let store = app.state::<NavigationStore>();
     let _operation = store.native_ops.lock().await;
     let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -1467,6 +1475,7 @@ fn create_profile(
 ) -> Result<BrowserProfile, String> {
     require_local_shell(&webview, current_profile_id.as_deref())?;
     let profile = store.create(&name, &avatar, &accent)?;
+    publish_manifest(&app);
     let _ = app.emit("browser:profiles-changed", ());
     Ok(profile)
 }
@@ -1484,6 +1493,7 @@ fn update_profile(
 ) -> Result<BrowserProfile, String> {
     require_local_shell(&webview, current_profile_id.as_deref())?;
     let profile = store.update(&profile_id, &name, &avatar, &accent)?;
+    publish_manifest(&app);
     let _ = app.emit("browser:profiles-changed", ());
     Ok(profile)
 }
@@ -1506,10 +1516,100 @@ fn show_profile_manager(
         .map_err(|_| "Could not focus profile management.".to_owned())
 }
 
+/// Rewrites `%LOCALAPPDATA%\LEVI\ecosystem\browser.json` with the current Spaces
+/// so Command Center can find this executable and offer "Open in Space".
+fn publish_manifest(app: &AppHandle) {
+    let result = (|| -> Result<PathBuf, String> {
+        let local = app
+            .path()
+            .local_data_dir()
+            .map_err(|error| format!("Could not resolve the local data folder: {error}"))?;
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("Could not resolve the Browser executable: {error}"))?;
+        let profiles = app.state::<ProfileStore>().list()?;
+        ecosystem::write_manifest(
+            &ecosystem::manifest_dir(&local),
+            &app.package_info().version.to_string(),
+            &executable,
+            &profiles,
+        )
+    })();
+    if let Err(error) = result {
+        log::warn!("Could not publish the LEVI ecosystem manifest: {error}");
+    }
+}
+
+/// Handles `--space <id> --open <url>` from this launch, or from a second launch
+/// forwarded by single-instance. A forwarded launch without a request brings the
+/// profile manager forward. Invalid requests are logged and ignored.
+fn handle_launch(app: &AppHandle, argv: Vec<String>, forwarded: bool) {
+    let request = match ecosystem::parse_launch_args(&argv) {
+        Ok(Some(request)) => request,
+        Ok(None) => {
+            if forwarded {
+                if let Some(main) = app.get_webview_window("main") {
+                    let _ = main.show();
+                    let _ = main.set_focus();
+                }
+            }
+            return;
+        }
+        Err(error) => {
+            log::warn!("Ignored a launch request: {error}");
+            return;
+        }
+    };
+    if app.state::<ProfileStore>().get(&request.space).is_err() {
+        log::warn!(
+            "Ignored a launch request for unknown Space {}",
+            request.space
+        );
+        return;
+    }
+    if let Err(error) = app.state::<LaunchQueue>().push(&request) {
+        log::warn!("Ignored a launch request: {error}");
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let space = request.space;
+        match open_profile_window(app.clone(), space.clone()).await {
+            // The chrome takes queued pages on load; an already-open chrome is nudged.
+            Ok(_) => {
+                if let Ok((_, chrome, _)) = browser_labels(&space) {
+                    let _ = app.emit_to(
+                        tauri::EventTarget::webview(chrome),
+                        "browser:open-request",
+                        serde_json::json!({ "profileId": space }),
+                    );
+                }
+            }
+            Err(error) => log::warn!("Could not open Space {space} for a launch request: {error}"),
+        }
+    });
+}
+
+/// Hands a Space's chrome the pages queued for it by launch requests, once.
+#[tauri::command]
+fn browser_take_launch_urls(
+    app: AppHandle,
+    webview: Webview,
+    profile_id: String,
+) -> Result<Vec<String>, String> {
+    require_profile_chrome(&webview, &profile_id)?;
+    Ok(app.state::<LaunchQueue>().take(&profile_id))
+}
+
 fn main() {
     tauri::Builder::default()
+        // Registered first: a second launch hands its arguments to this instance
+        // instead of starting another Browser on the same WebView2 folders.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            handle_launch(app, argv, true);
+        }))
         .plugin(log_plugin())
         .manage(NavigationStore::default())
+        .manage(LaunchQueue::default())
         .setup(|app| {
             let catalog = app
                 .path()
@@ -1518,6 +1618,8 @@ fn main() {
             let store = ProfileStore::load(catalog)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
             app.manage(store);
+            publish_manifest(app.handle());
+            handle_launch(app.handle(), std::env::args().collect(), false);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1537,7 +1639,8 @@ fn main() {
             browser_back,
             browser_forward,
             browser_reload,
-            browser_stop
+            browser_stop,
+            browser_take_launch_urls
         ])
         .run(tauri::generate_context!())
         .expect("LEVI Browser failed to start");
