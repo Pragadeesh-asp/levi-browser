@@ -1,5 +1,16 @@
 # LEVI BROWSER Progress
 
+## Ecosystem bridge v1 (2026-11-22)
+
+Same branch, `wip/week1-stabilize`, commit `d9f75da`.
+
+- Publishes `%LOCALAPPDATA%\LEVI\ecosystem\browser.json` (schema 1: version, executable, launch syntax, Spaces) atomically at startup and after a profile is created or renamed. LEVI Command Center reads it to offer "Open in Space".
+- Accepts `--space <id> --open <url>` on the command line. Only local processes can pass arguments, so websites can't trigger it. URLs must be http/https without credentials, and the Space must exist.
+- `tauri-plugin-single-instance` forwards a second launch to the running Browser instead of starting another process on the same WebView2 folders. A second launch without a request brings the profile manager forward.
+- Requested pages wait in a per-Space queue until that Space's chrome takes them (`browser_take_launch_urls`, chrome-label checked). The chrome reuses an empty first tab; otherwise each page gets a new tab.
+- **Checks passed:** 26 Rust tests (5 new), `npm run build` (with `tsc`), `npm run lint`, `cargo fmt --check`, clippy (2 older warnings).
+- **Not verified:** a native run that receives a launch request from Command Center, and single-instance forwarding with a real second launch.
+
 ## Week 1 stabilization (2026-11-22)
 
 Branch `wip/week1-stabilize` (local; not pushed). It starts from `a80f217`, a snapshot of all previously uncommitted work (profile management, LEVI theme, tab work). `artifacts/` screenshots stay untracked.
