@@ -1,0 +1,27 @@
+/* Carbon & Ice Blue finish. Loaded after levi-theme.css.
+   About 60% carbon, 30% graphite, 10% ice blue. Flat: no gradients, no glow. */
+
+body, .shell, .probe-shell { background-color: var(--levi-gunmetal); background-image: var(--levi-carbon-weave); }
+.tab-strip, .rail { background: var(--levi-carbon); }
+.browser-toolbar { background: var(--levi-surface-1); box-shadow: none; }
+
+.address-form { background: var(--levi-surface-2); border-color: transparent; box-shadow: none; }
+.address-form:focus-within { border-color: var(--levi-crimson); box-shadow: var(--levi-focus-ring); }
+
+.tab-item.active { color: var(--levi-text-primary); background: var(--levi-surface-2); border-color: transparent; border-top: 2px solid var(--levi-crimson); box-shadow: none; }
+
+.go-button, .primary { color: var(--levi-text-on-accent); background: var(--levi-crimson); border-color: var(--levi-crimson); box-shadow: none; }
+.go-button:hover, .primary:hover { color: var(--levi-text-on-accent); background: var(--levi-crimson-soft); border-color: var(--levi-crimson-soft); }
+.new-tab:hover { color: var(--levi-text-on-accent); background: var(--levi-crimson); }
+
+.brand-mark, .probe-shell .brand-mark { color: var(--levi-crimson); background: transparent; border-color: var(--levi-crimson); box-shadow: none; }
+.brand-mark span, .probe-shell .brand-mark span { color: var(--levi-crimson); }
+.profile-orbit { color: var(--levi-text-primary); background: var(--levi-surface-3); }
+
+h1, h2, .eyebrow, .overline { font-family: var(--levi-font-display); font-stretch: condensed; }
+h1, h2 { text-transform: uppercase; letter-spacing: .03em; font-weight: 600; }
+
+.toast { color: var(--levi-text-on-accent); background: var(--levi-crimson); }
+::selection { color: var(--levi-text-on-accent); background: var(--levi-crimson); }
+.empty-shortcut kbd { border-color: var(--levi-border-subtle); }
+.icon-button:disabled { color: var(--levi-text-disabled); }

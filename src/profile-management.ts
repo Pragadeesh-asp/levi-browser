@@ -5,7 +5,7 @@ export interface BrowserProfile { id: string; name: string; avatar: string; acce
 export function createProfileDialog(currentProfileId: string | null, onCreated: (id: string) => void) {
   const dialog = document.createElement('dialog')
   dialog.className = 'profile-dialog'
-  dialog.innerHTML = `<form method="dialog" class="profile-dialog-card"><header><div><span class="eyebrow">BROWSER PROFILES</span><h2 id="profile-dialog-title">Add profile</h2></div><button class="profile-dialog-close" value="cancel" aria-label="Close">×</button></header><label>Profile name<input name="name" maxlength="40" required autocomplete="off"/></label><div class="profile-dialog-row"><label>Avatar / initial<input name="avatar" maxlength="3" value="L" required/></label><label>Accent<input name="accent" type="color" value="#C7F000"/></label></div><p class="profile-dialog-error" role="alert"></p><footer><button type="button" class="subtle" data-cancel>Cancel</button><button type="submit" class="primary" data-save>Create profile</button></footer></form>`
+  dialog.innerHTML = `<form method="dialog" class="profile-dialog-card"><header><div><span class="eyebrow">BROWSER PROFILES</span><h2 id="profile-dialog-title">Add profile</h2></div><button class="profile-dialog-close" value="cancel" aria-label="Close">×</button></header><label>Profile name<input name="name" maxlength="40" required autocomplete="off"/></label><div class="profile-dialog-row"><label>Avatar / initial<input name="avatar" maxlength="3" value="L" required/></label><label>Accent<input name="accent" type="color" value="#8CC4FF"/></label></div><p class="profile-dialog-error" role="alert"></p><footer><button type="button" class="subtle" data-cancel>Cancel</button><button type="submit" class="primary" data-save>Create profile</button></footer></form>`
   document.body.append(dialog)
   const form = dialog.querySelector<HTMLFormElement>('form')!
   const name = form.elements.namedItem('name') as HTMLInputElement
@@ -39,7 +39,7 @@ export function createProfileDialog(currentProfileId: string | null, onCreated: 
       editingId = profile?.id ?? null
       name.value = profile?.name ?? ''
       avatar.value = profile?.avatar ?? 'L'
-      accent.value = profile?.accent ?? '#C7F000'
+      accent.value = profile?.accent ?? '#8CC4FF'
       error.textContent = ''
       dialog.querySelector('#profile-dialog-title')!.textContent = profile ? 'Manage profile' : 'Add profile'
       dialog.querySelector<HTMLButtonElement>('[data-save]')!.textContent = profile ? 'Save changes' : 'Create profile'

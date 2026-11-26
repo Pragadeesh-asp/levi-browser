@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event'
 import { createProfileDialog, type BrowserProfile } from './profile-management'
 import './browser.css'
 import './levi-theme.css'
+import './levi-carbon.css'
 import './levi-effects.css'
 
 type NavigationState = {

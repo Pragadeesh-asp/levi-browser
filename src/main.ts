@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { createProfileDialog, type BrowserProfile } from './profile-management'
 import './style.css'
 import './levi-theme.css'
+import './levi-carbon.css'
 
 type ProfileLaunch = { profileId: string; windowLabel: string; dataDirectory: string; reusedWindow: boolean }
 const app = document.querySelector<HTMLDivElement>('#app')!

@@ -1,5 +1,6 @@
 import './profile.css'
 import './levi-theme.css'
+import './levi-carbon.css'
 
 const profileId = location.pathname.endsWith('profile-alpha.html')
   ? 'alpha'
