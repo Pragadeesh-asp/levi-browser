@@ -16,6 +16,8 @@ use tabs::BrowserRegistry;
 mod profiles;
 use profiles::{BrowserProfile, ProfileStore};
 mod ecosystem;
+mod library;
+use library::LibraryStore;
 use ecosystem::LaunchQueue;
 
 /// Tab strip (40px) plus address row (50px); must match levi-carbon.css.
@@ -288,6 +290,10 @@ fn emit_tabs_state(app: &AppHandle, profile_id: &str) {
         .ok()
         .and_then(|registry| registry.profile_tabs_snapshot(profile_id).ok());
     if let Some(snapshot) = snapshot {
+        let open_pages: Vec<String> = snapshot.tabs.iter().filter_map(|tab| tab.current_url.clone()).collect();
+        if let Some(library) = app.try_state::<LibraryStore>() {
+            let _ = library.set_session(profile_id, &open_pages);
+        }
         if let Ok((_, chrome, _)) = browser_labels(profile_id) {
             let _ = app.emit_to(
                 tauri::EventTarget::webview(chrome),
@@ -794,10 +800,14 @@ fn ensure_content_webview(
                         generation_load,
                         &target,
                     );
+                    if let Err(error) = app_load.state::<LibraryStore>().record_visit(&profile_load, target.as_str()) {
+                        log::warn!("history not recorded: {error}");
+                    }
                 }
             }
         })
         .on_document_title_changed(move |_webview, title| {
+            let history_title = title.clone();
             let updated = app_title
                 .state::<NavigationStore>()
                 .registry
@@ -813,6 +823,16 @@ fn ensure_content_webview(
                 });
             if updated {
                 emit_tabs_state(&app_title, &profile_title);
+                let url = app_title
+                    .state::<NavigationStore>()
+                    .registry
+                    .lock()
+                    .ok()
+                    .and_then(|registry| registry.tab_snapshot(&profile_title, &tab_title).ok())
+                    .and_then(|tab| tab.current_url);
+                if let Some(url) = url {
+                    let _ = app_title.state::<LibraryStore>().set_title(&profile_title, &url, &history_title);
+                }
             }
         });
     if let Err(error) = window.add_child(
@@ -1619,6 +1639,7 @@ fn main() {
             let store = ProfileStore::load(catalog)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
             app.manage(store);
+            app.manage(LibraryStore::new(app.path().app_local_data_dir()?.join("library")));
             publish_manifest(app.handle());
             handle_launch(app.handle(), std::env::args().collect(), false);
             Ok(())
@@ -1641,11 +1662,133 @@ fn main() {
             browser_forward,
             browser_reload,
             browser_stop,
-            browser_take_launch_urls
+            browser_take_launch_urls,
+            browser_history,
+            browser_clear_history,
+            browser_bookmarks,
+            browser_toggle_bookmark,
+            browser_is_bookmarked,
+            browser_last_session,
+            browser_set_overlay,
+            browser_all_tabs,
+            browser_focus_tab
         ])
         .run(tauri::generate_context!())
         .expect("LEVI Browser failed to start");
 }
+
+/* ---------- Library: history, bookmarks, last session ---------- */
+
+#[tauri::command]
+fn browser_history(app: AppHandle, webview: Webview, profile_id: String, query: Option<String>) -> Result<Vec<library::HistoryEntry>, String> {
+    require_profile_chrome(&webview, &profile_id)?;
+    app.state::<LibraryStore>().history(&profile_id, query.as_deref().unwrap_or(""), 300)
+}
+
+#[tauri::command]
+fn browser_clear_history(app: AppHandle, webview: Webview, profile_id: String) -> Result<(), String> {
+    require_profile_chrome(&webview, &profile_id)?;
+    app.state::<LibraryStore>().clear_history(&profile_id)
+}
+
+#[tauri::command]
+fn browser_bookmarks(app: AppHandle, webview: Webview, profile_id: String) -> Result<Vec<library::Bookmark>, String> {
+    require_profile_chrome(&webview, &profile_id)?;
+    app.state::<LibraryStore>().bookmarks(&profile_id)
+}
+
+#[tauri::command]
+fn browser_toggle_bookmark(app: AppHandle, webview: Webview, profile_id: String, url: String, title: String) -> Result<bool, String> {
+    require_profile_chrome(&webview, &profile_id)?;
+    app.state::<LibraryStore>().toggle_bookmark(&profile_id, &url, &title)
+}
+
+#[tauri::command]
+fn browser_is_bookmarked(app: AppHandle, webview: Webview, profile_id: String, url: String) -> Result<bool, String> {
+    require_profile_chrome(&webview, &profile_id)?;
+    app.state::<LibraryStore>().is_bookmarked(&profile_id, &url)
+}
+
+#[tauri::command]
+fn browser_last_session(app: AppHandle, webview: Webview, profile_id: String) -> Result<Vec<String>, String> {
+    require_profile_chrome(&webview, &profile_id)?;
+    app.state::<LibraryStore>().session(&profile_id)
+}
+
+/// Hides the active page while a full-height panel (Library, tab search, Space menu) is open
+/// in the toolbar, and shows it again afterwards. Pages are native views drawn above the toolbar.
+#[tauri::command]
+fn browser_set_overlay(app: AppHandle, webview: Webview, profile_id: String, open: bool) -> Result<(), String> {
+    require_profile_chrome(&webview, &profile_id)?;
+    let label = {
+        let store = app.state::<NavigationStore>();
+        let registry = store.registry.lock().map_err(|_| "Browser tab registry is unavailable.".to_owned())?;
+        registry.profile(&profile_id).and_then(|profile| {
+            profile
+                .tabs
+                .get(&profile.active_tab_id)
+                .filter(|tab| tab.lifecycle == tabs::TabLifecycle::Ready)
+                .map(|tab| tab.webview_label.clone())
+        })
+    };
+    if let Some(content) = label.and_then(|label| app.get_webview(&label)) {
+        if open { content.hide() } else { content.show() }.map_err(|_| "Could not change the page view.".to_owned())?;
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenTab {
+    profile_id: String,
+    profile_name: String,
+    accent: String,
+    tab_id: String,
+    title: String,
+    url: String,
+    active: bool,
+}
+
+/// Every open tab in every open Space, for tab search.
+#[tauri::command]
+fn browser_all_tabs(app: AppHandle, webview: Webview, profile_id: String) -> Result<Vec<OpenTab>, String> {
+    require_profile_chrome(&webview, &profile_id)?;
+    let profiles = app.state::<ProfileStore>().list()?;
+    let store = app.state::<NavigationStore>();
+    let registry = store.registry.lock().map_err(|_| "Browser tab registry is unavailable.".to_owned())?;
+    let mut found = Vec::new();
+    for profile in profiles {
+        if let Ok(snapshot) = registry.profile_tabs_snapshot(&profile.id) {
+            for tab in snapshot.tabs {
+                found.push(OpenTab {
+                    profile_id: profile.id.clone(),
+                    profile_name: profile.name.clone(),
+                    accent: profile.accent.clone(),
+                    active: tab.id == snapshot.active_tab_id,
+                    title: tab.title.clone().unwrap_or_default(),
+                    url: tab.current_url.clone().unwrap_or_default(),
+                    tab_id: tab.id,
+                });
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Brings another Space's window forward and asks its toolbar to select the tab;
+/// each Space still selects its own tabs through its own guarded command.
+#[tauri::command]
+fn browser_focus_tab(app: AppHandle, webview: Webview, profile_id: String, target_profile_id: String, tab_id: String) -> Result<(), String> {
+    require_profile_chrome(&webview, &profile_id)?;
+    let (window_label, chrome_label, _) = browser_labels(&target_profile_id)?;
+    if let Some(window) = app.get_window(&window_label) {
+        let _ = window.unminimize();
+        window.set_focus().map_err(|_| "Could not bring that Space forward.".to_owned())?;
+    }
+    app.emit_to(tauri::EventTarget::webview(chrome_label), "browser:select-tab", tab_id)
+        .map_err(|_| "Could not reach that Space.".to_owned())
+}
+
 
 #[cfg(test)]
 mod tests {
