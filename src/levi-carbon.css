@@ -1,7 +1,49 @@
 /* Carbon & Ice Blue finish. Loaded after levi-theme.css.
    About 60% carbon, 30% graphite, 10% ice blue. Flat: no gradients, no glow. */
 
+:root { color: var(--levi-text-primary); background: var(--levi-gunmetal); }
 body, .shell, .probe-shell { background-color: var(--levi-gunmetal); background-image: var(--levi-carbon-weave); }
+
+/* ---------- Browser chrome: tabs row (40px) over address row (50px) = CHROME_HEIGHT 90 in main.rs ---------- */
+#browser { display: grid; grid-template-rows: 40px 50px minmax(0, 1fr); height: 100vh; }
+.tab-strip { height: 40px; display: flex; align-items: flex-end; gap: 6px; padding: 0 10px; background: var(--levi-carbon); border-bottom: 1px solid var(--levi-border-subtle); }
+.tab-strip .tabs { display: flex; align-items: flex-end; gap: 2px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.tab-strip .profile-chip { align-self: center; flex: none; display: inline-flex; align-items: center; gap: 7px; height: 26px; padding: 0 10px; border: 1px solid var(--levi-border-strong); border-radius: 6px; background: var(--levi-surface-2); color: var(--levi-text-primary); font: 600 11px/1 var(--levi-font-display); font-stretch: condensed; letter-spacing: .08em; text-transform: uppercase; cursor: pointer; }
+.tab-strip .profile-chip i { width: 7px; height: 7px; border-radius: 50%; background: var(--levi-crimson); box-shadow: none; }
+.tab-strip .profile-chip .chip-caret { color: var(--levi-text-muted); font-size: 10px; }
+.tab-item { height: 32px; min-width: 110px; max-width: 220px; border-radius: 8px 8px 0 0; background: transparent; color: var(--levi-text-muted); }
+.tab-item:hover { background: var(--levi-surface-1); color: var(--levi-text-secondary); }
+.tab-close, .new-tab { width: 24px; height: 24px; color: var(--levi-text-muted); }
+.new-tab { align-self: center; flex: none; font-size: 18px; border-radius: 6px; }
+.tab-status.loading { background: var(--levi-crimson); box-shadow: none; }
+.tab-favicon { color: var(--levi-text-muted); }
+
+.browser-toolbar { height: 50px; display: flex; align-items: center; gap: 10px; padding: 0 10px; border-bottom: 1px solid var(--levi-border-subtle); }
+.nav-controls { display: flex; align-items: center; gap: 2px; }
+.icon-button { width: 32px; height: 32px; border-radius: 7px; font-size: 18px; color: var(--levi-text-secondary); }
+.icon-button:hover:not(:disabled) { color: var(--levi-text-primary); background: var(--levi-surface-2); border-color: transparent; }
+.stop-button { color: var(--levi-danger); }
+
+/* One address bar: search icon, the address, the search engine, Go. */
+.address-form { flex: 1; min-width: 0; height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 4px 0 12px; border: 1px solid transparent; border-radius: 8px; background: var(--levi-surface-2); box-shadow: none; }
+.address-form:hover { border-color: var(--levi-border-subtle); }
+.address-form .secure-mark { color: var(--levi-text-muted); font-size: 15px; }
+.address-form input { flex: 1; min-width: 0; font: 13px/1 "Segoe UI", system-ui, sans-serif; color: var(--levi-text-primary); }
+.address-form input::placeholder { color: var(--levi-text-muted); }
+.address-form .search-setting { display: flex; flex: none; margin: 0; padding-left: 8px; border-left: 1px solid var(--levi-border-subtle); }
+.address-form .search-setting select { max-width: 110px; height: 26px; padding: 0 6px; border: 0; background: transparent; color: var(--levi-text-muted); font: 12px "Segoe UI", system-ui, sans-serif; cursor: pointer; }
+.address-form .search-setting select:hover { color: var(--levi-text-primary); }
+.address-form .go-button { width: 28px; height: 26px; border-radius: 6px; font-size: 15px; }
+
+/* Empty state */
+.browser-empty h1 em { color: var(--levi-crimson); }
+.empty-orbit { border-color: var(--levi-border-strong); color: var(--levi-text-primary); box-shadow: none; border-radius: 12px; }
+.empty-orbit span { color: var(--levi-crimson); }
+.overline { color: var(--levi-text-muted); letter-spacing: .16em; }
+.empty-copy { color: var(--levi-text-secondary); }
+.loading-strip span { background: var(--levi-crimson); }
+.browser-message { background: var(--levi-surface-2); border-color: var(--levi-border-strong); color: var(--levi-text-primary); }
+.profile-menu { background: var(--levi-surface-1); border-color: var(--levi-border-subtle); }
 .tab-strip, .rail { background: var(--levi-carbon); }
 .browser-toolbar { background: var(--levi-surface-1); box-shadow: none; }
 

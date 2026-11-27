@@ -18,7 +18,8 @@ use profiles::{BrowserProfile, ProfileStore};
 mod ecosystem;
 use ecosystem::LaunchQueue;
 
-const CHROME_HEIGHT: f64 = 132.0;
+/// Tab strip (40px) plus address row (50px); must match levi-carbon.css.
+const CHROME_HEIGHT: f64 = 90.0;
 const INITIAL_WIDTH: f64 = 1120.0;
 const INITIAL_HEIGHT: f64 = 760.0;
 

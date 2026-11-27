@@ -34,6 +34,11 @@ const defaultSearch = 'https://duckduckgo.com/?q={query}'
 const root = document.querySelector<HTMLDivElement>('#browser')!
 
 root.innerHTML = `
+  <nav class="tab-strip" aria-label="Browser tabs">
+    <button class="profile-chip" id="profile-menu-button" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="profile-menu" title="Switch Space"><i></i><span id="profile-chip-label">Profile</span><span class="chip-caret" aria-hidden="true">▾</span></button>
+    <div id="tabs" class="tabs"></div>
+    <button id="new-tab" class="new-tab" title="New tab (Ctrl+T)" aria-label="New tab">+</button>
+  </nav>
   <header class="browser-toolbar">
     <div class="nav-controls" aria-label="Navigation controls">
       <button class="icon-button" id="back" aria-label="Back" title="Back" disabled>‹</button>
@@ -42,27 +47,25 @@ root.innerHTML = `
       <button class="icon-button stop-button" id="stop" aria-label="Stop loading" title="Stop loading" hidden>×</button>
       <button class="icon-button" id="home" aria-label="Home" title="Home">⌂</button>
     </div>
-    <div class="address-form browser-address-beam" id="address-form">
-      <span class="secure-mark" aria-hidden="true">◈</span>
+    <div class="address-form" id="address-form">
+      <span class="secure-mark" aria-hidden="true">⌕</span>
       <input id="address" type="text" autocomplete="off" spellcheck="false" placeholder="Search or enter a website address" aria-label="Search or enter a website address" />
-      <button class="go-button" type="button" aria-label="Go">↵</button>
+      <label class="search-setting" title="Search engine for typed searches">
+        <select id="search-engine" aria-label="Search engine">
+          <option value="https://duckduckgo.com/?q={query}">DuckDuckGo</option>
+          <option value="https://www.google.com/search?q={query}">Google</option>
+          <option value="https://www.bing.com/search?q={query}">Bing</option>
+        </select>
+      </label>
+      <button class="go-button" type="button" aria-label="Go" title="Go (Enter)">→</button>
     </div>
-    <label class="search-setting" title="Search engine">
-      <select id="search-engine" aria-label="Search engine">
-        <option value="https://duckduckgo.com/?q={query}">DuckDuckGo</option>
-        <option value="https://www.google.com/search?q={query}">Google</option>
-        <option value="https://www.bing.com/search?q={query}">Bing</option>
-      </select>
-    </label>
-    <button class="profile-chip" id="profile-menu-button" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="profile-menu"><i></i><span id="profile-chip-label">Profile</span><span aria-hidden="true">⌄</span></button>
   </header>
-  <section class="profile-menu" id="profile-menu" hidden aria-label="Browser profile menu"><div class="profile-menu-current"><span class="eyebrow">CURRENT PROFILE</span><strong id="profile-current-name"></strong></div><div class="profile-menu-list" id="profile-menu-list"></div><div class="profile-menu-actions"><button id="profile-add" type="button">＋ Add Profile</button><button id="profile-manage" type="button">Manage Profiles</button></div></section>
-  <nav class="tab-strip" aria-label="Browser tabs"><div id="tabs" class="tabs"></div><button id="new-tab" class="new-tab" title="New tab" aria-label="New tab">+</button></nav>
+  <section class="profile-menu" id="profile-menu" hidden aria-label="Browser profile menu"><div class="profile-menu-current"><span class="eyebrow">CURRENT SPACE</span><strong id="profile-current-name"></strong></div><div class="profile-menu-list" id="profile-menu-list"></div><div class="profile-menu-actions"><button id="profile-add" type="button">＋ Add Space</button><button id="profile-manage" type="button">Manage Spaces</button></div></section>
   <main class="browser-empty" id="empty-state">
     <div class="empty-orbit">L<span>•</span></div>
-    <p class="overline">LEVI BROWSER / ${profileId.toUpperCase()} ISOLATED SPACE</p>
-    <h1>Your next<br/><em>destination.</em></h1>
-    <p class="empty-copy">Enter a website address or a search above. Tabs in this space share its persistent WebView2 storage.</p>
+    <p class="overline">LEVI BROWSER · ${profileId.toUpperCase()} SPACE</p>
+    <h1>Where to?</h1>
+    <p class="empty-copy">Type an address or a search above. Every tab in this Space keeps its own sign-ins and history, separate from your other Spaces.</p>
     <div class="empty-shortcut"><kbd>Ctrl</kbd><span>+</span><kbd>L</kbd><span>Focus the address bar</span></div>
   </main>
   <div class="loading-strip" id="loading-strip"><span></span><span></span><span></span></div>
